@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ video.title }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <!-- 添加 Fancybox CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fancyapps/ui@4.0/dist/fancybox.css"/>
+    <link href="../static/css/style.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold mb-4">{{ video.title }}</h1>
+        <p style="text-align:right;"><a href="{{ url_for('index') }}">Back to Index</a></p>
+        <ul class="list-disc list-inside mb-4">
+            <li>創作者：{{ video.creator }}</li>
+            <li>影片網址：<a href="https://www.youtube.com/watch?v={{ video.youtube_id }}" target="_blank">https://www.youtube.com/watch?v={{ video.youtube_id }}</a></li>
+            <li>上傳日期：{{ video.timestamp|datetime_format if video.timestamp else '' }}</li>
+            <li>影片長度：{{ video.duration }}</li>
+            <li>影片語言：{{ video.language }}</li>
+            <li>處理日期：{{ video.processed_at|datetime_format }}</li>
+            <li>截圖數量：{{ video.screenshots | length }}</li>
+            <li>有無字幕：{{ video.subtitle_used }}</li>            
+            <li>影片 ID：{{ video.youtube_id }}</li>
+        </ul>
+        <h2 class="text-2xl font-semibold mb-4">Summary</h2>
+        <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+            {{ video.summary | safe }}
+        </div>
+
+        <h2 class="text-2xl font-semibold mb-4">Screenshots and Subtitles</h2>
+
+    <!-- 右側中間的切換按鈕 -->
+    <div id="toggleButton" class="fixed right-4 top-1/2 transform -translate-y-1/2 bg-blue-500 text-white px-4 py-2 rounded-l-full cursor-pointer shadow-lg">
+        原文<br>顯示
+    </div>
+
+        <!-- 截圖和字幕網格 -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {% for item in paired_data %}
+        <div class="bg-white rounded-lg shadow-md overflow-hidden">
+            <a href="{{ url_for('static', filename='screenshots/' + item.screenshot.filename) }}" 
+                data-fancybox="gallery"
+                data-caption="時間：{{ item.screenshot.timestamp | format_timestamp }}</br>
+                        原文：<blockquote> {{ item.original_subtitles | map(attribute='text') | join('</br>') }}</blockquote>
+                        翻譯：<blockquote> {{ item.translated_subtitles | map(attribute='text') | join('</br>') }}</blockquote>">
+                <img src="{{ url_for('static', filename='screenshots/' + item.screenshot.filename) }}" 
+                     alt="截圖時間：{{ item.screenshot.timestamp }}"
+                     class="w-full h-48 object-cover">
+            </a>
+            <div class="p-4">
+                <p class="font-bold">{{ item.screenshot.timestamp | format_timestamp }}</p>
+
+                <div class="translated-subtitle">
+                    {% if item.translated_subtitles %}
+                    <p class="text-sm text-gray-600 mt-2"></p>
+                    {% for subtitle in item.translated_subtitles %}
+                    <p class="text-sm">{{ subtitle.text }}</p>
+                    {% endfor %}
+                    {% endif %}
+                </div>
+                <div class="original-subtitle hidden">
+                    {% if item.original_subtitles %}
+                    <p class="text-sm text-gray-600 mt-2">原文:</p>
+                    {% for subtitle in item.original_subtitles %}
+                    <p class="text-sm">{{ subtitle.text }}</p>
+                    {% endfor %}
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    
+        <h2 class="text-2xl font-semibold mb-4">Translation and Transcription</h2>
+        <div class="translation-transcription-container">
+            <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+                <h3 class="text-xl font-semibold mb-2">Translation</h3>
+                <pre id="full-translation">{{ video.translation }}</pre>
+            </div>
+            <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+                <h3 class="text-xl font-semibold mb-2">Transcription</h3>
+                <pre id="full-transcription">{{ video.transcription }}</pre>
+            </div>
+        </div>
+
+        <p style="text-align:right;"><a href="{{ url_for('index') }}">Back to Index</a></p>
+    </div>
+
+    <!-- 添加 Fancybox JS -->
+    <script src="https://cdn.jsdelivr.net/npm/@fancyapps/ui@4.0/dist/fancybox.umd.js"></script>
+    <script>
+        // 初始化 Fancybox
+        Fancybox.bind("[data-fancybox]", {
+            // 可以在這裡添加 Fancybox 的配置選項
+            caption: {
+    type: "html"
+  }
+        });
+    </script>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const toggleButton = document.getElementById('toggleButton');
+        const originalSubtitles = document.querySelectorAll('.original-subtitle');
+        let isOriginalVisible = false;
+
+        toggleButton.addEventListener('click', function() {
+            isOriginalVisible = !isOriginalVisible;
+            originalSubtitles.forEach(subtitle => {
+                subtitle.classList.toggle('hidden');
+            });
+            toggleButton.innerHTML = isOriginalVisible ? '原文<br>隱藏' : '原文<br>顯示';
+        });
+    });
+</script>
+
+</body>
+</html>

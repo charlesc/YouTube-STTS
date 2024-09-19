@@ -1,0 +1,147 @@
+
+body {
+    font-family: Arial, sans-serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 20px;
+}
+h1, h2 {
+    color: #333;
+}
+form {
+    margin-bottom: 20px;
+}
+input[type="text"], input[type="number"], button {
+    padding: 8px;
+    margin-right: 10px;
+    font-size: 1rem;
+}
+button {
+    cursor: pointer;
+    background-color: #4CAF50;
+    color: white;
+    border: none;
+}
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 1.2rem;
+}
+th, td {
+    padding: 12px;
+    text-align: left;
+    border-bottom: 1px solid #ddd;
+}
+th {
+    background-color: #f2f2f2;
+    cursor: pointer;
+}
+tr:nth-child(even) {
+    background-color: #f9f9f9;
+}
+.icon {
+    margin-right: 5px;
+}
+.action-button {
+    background: none;
+    border: none;
+    color: red;
+    cursor: pointer;
+    font-size: 1.2rem;
+}
+.sort-icon::after {
+    content: '\f0dc';
+    font-family: 'Font Awesome 5 Free';
+    font-weight: 900;
+    margin-left: 5px;
+    color: #999;
+}
+.sort-icon.asc::after {
+    content: '\f0de';
+    color: #333;
+}
+.sort-icon.desc::after {
+    content: '\f0dd';
+    color: #333;
+}
+
+.fancybox__caption {font-size:1.5em;}
+.h-48 {height:auto;}
+.translation-transcription-container {
+    display: flex;
+    gap: 20px;
+}
+.translation-transcription-container > div {
+    flex: 1;
+}
+pre {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+#toggleButton {
+transition: all 0.3s ease;
+z-index: 1000;
+writing-mode: vertical-rl;
+text-orientation: upright;
+padding: 10px 5px;
+border-top-left-radius: 20px;
+border-bottom-left-radius: 20px;
+border-top-right-radius: 0;
+border-bottom-right-radius: 0;
+}
+
+#toggleButton:hover {
+background-color: #3182ce;
+right: 0;
+}
+
+.hidden {
+display: none;
+}
+/* 恢復列表的默認樣式 */
+ol, ul {
+list-style: revert;
+margin: revert;
+padding: revert;
+}
+
+/* 設置有序列表樣式 */
+ol {
+list-style-type: decimal;
+padding-left: 1.5em;
+}
+
+/* 設置無序列表樣式 */
+ul {
+list-style-type: disc;
+padding-left: 1.5em;
+}
+
+/* 處理嵌套列表 */
+ol ol, ul ul, ol ul, ul ol {
+margin-bottom: 0;
+margin-top: 0;
+}
+
+/* 設置列表項的間距 */
+li {
+margin-bottom: 0.5em;
+}
+
+/* 確保這些樣式優先級高於 Tailwind */
+.prose ol, .prose ul {
+list-style: revert;
+margin: revert;
+padding: revert;
+}
+
+.prose ol {
+list-style-type: decimal;
+padding-left: 1.5em;
+}
+
+.prose ul {
+list-style-type: disc;
+padding-left: 1.5em;
+}
+

@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Video Screenshot App</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="static/css/style.css" rel="stylesheet">
+</head>
+<body>
+    <h1>YouTube Video Screenshot-Transcription-Translation-Summary App</h1>
+
+    <h2>Process Video</h2>
+    <form id="videoForm">
+        <input type="text" id="youtubeUrl" placeholder="Enter YouTube URL" value="" required style="width:400px;">
+        <input type="number" id="captureInterval" placeholder="Capture interval (seconds)" min="1" value="10" required style="width:50px;">
+        <button type="submit">Process Video</button>
+    </form>
+    <div id="message"></div>
+    <div id="resultContainer"></div>
+
+    <table id="videoTable">
+        <thead>
+            <tr>
+                <th class="sortable" data-sort="title"><i class="fas fa-video icon"></i>標題<span class="sort-icon"></span></th>
+                <th class="sortable" data-sort="creator"><i class="fas fa-user icon"></i>作者<span class="sort-icon"></span></th>
+                <th class="sortable" data-sort="timestamp"><i class="far fa-clock icon"></i>發布時間<span class="sort-icon"></span></th>
+                <th class="sortable" data-sort="duration"><i class="fas fa-hourglass-half icon"></i>長度<span class="sort-icon"></span></th>
+                <th class="sortable" data-sort="language"><i class="fas fa-globe icon"></i>語言<span class="sort-icon"></span></th>
+                <th class="sortable" data-sort="subtitles"><i class="fas fa-closed-captioning icon"></i>字幕<span class="sort-icon"></span></th>
+                <th><i class="fas fa-cog icon"></i>管理</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for video in videos %}
+            <tr>
+                <td>
+                    <a href="{{ url_for('video_screenshots', youtube_id=video['youtube_id']) }}">
+                        {{ video['title'] }}
+                    </a>
+                </td>
+                <td>{{ video.creator or 'Unknown' }}</td>
+                <td>{{ video.timestamp|datetime_format if video.timestamp else '' }}</td>
+                <td>{{ video.duration if video.duration else '' }}</td>
+                <td>{{ video.language if video.language else '' }}</td>
+                <td>{{ 'Yes' if video.subtitle_used else 'No' if video.subtitle_used is not none else '' }}</td>
+                <td>
+                    <button class="delete-btn" 
+                    data-youtube-id="{{ video['youtube_id'] }}"
+                    data-confirm-message="確定要刪除 '{{ video['title'] }}' 嗎？"
+                    aria-label="刪除視頻 '{{ video['title'] }}'"
+            >
+                <i class="fas fa-trash-alt"></i>
+            </button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const table = document.getElementById('videoTable');
+        const headers = table.querySelectorAll('th.sortable');
+        
+        headers.forEach(header => {
+            header.addEventListener('click', () => {
+                const column = header.dataset.sort;
+                const sortIcon = header.querySelector('.sort-icon');
+                const isAscending = sortIcon.classList.contains('asc');
+                
+                // Remove sorting classes from all headers
+                headers.forEach(h => h.querySelector('.sort-icon').className = 'sort-icon');
+                
+                // Set the new sorting direction
+                if (isAscending) {
+                    sortIcon.classList.add('desc');
+                } else {
+                    sortIcon.classList.add('asc');
+                }
+                
+                const rows = Array.from(table.querySelectorAll('tbody tr'));
+                
+                rows.sort((a, b) => {
+                    const aValue = a.children[Array.from(headers).indexOf(header)].textContent.trim();
+                    const bValue = b.children[Array.from(headers).indexOf(header)].textContent.trim();
+                    
+                    if (column === 'timestamp') {
+                        return compareDates(aValue, bValue, isAscending);
+                    } else if (column === 'duration') {
+                        return compareDurations(aValue, bValue, isAscending);
+                    } else {
+                        return compareStrings(aValue, bValue, isAscending);
+                    }
+                });
+                
+                // Remove existing rows
+                rows.forEach(row => row.remove());
+                
+                // Append sorted rows
+                rows.forEach(row => table.querySelector('tbody').appendChild(row));
+            });
+        });
+
+        function compareDates(a, b, isAscending) {
+            const dateA = new Date(a);
+            const dateB = new Date(b);
+            return isAscending ? dateA - dateB : dateB - dateA;
+        }
+
+        function compareDurations(a, b, isAscending) {
+            const getDurationInSeconds = (duration) => {
+                const parts = duration.split(':').map(Number);
+                return parts.reduce((acc, part) => acc * 60 + part, 0);
+            };
+            const durationA = getDurationInSeconds(a);
+            const durationB = getDurationInSeconds(b);
+            return isAscending ? durationA - durationB : durationB - durationA;
+        }
+
+        function compareStrings(a, b, isAscending) {
+            return isAscending ? a.localeCompare(b) : b.localeCompare(a);
+        }
+    });
+    </script>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
