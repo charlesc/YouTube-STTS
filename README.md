@@ -21,13 +21,19 @@
 B. 若沒有合適的字幕檔案：
 進行轉錄的動作，偵測轉錄內容的語文，然後依照上述做法進行翻譯和/或摘要。
 
+## 展示
+- [首頁](https://github.com/charlesc/YouTube-STTS/blob/main/demo/index.png)
+- [影片頁](https://github.com/charlesc/YouTube-STTS/blob/main/demo/sample-1.jpg)
+- [原文切換](https://github.com/charlesc/YouTube-STTS/blob/main/demo/sample-2.jpg)
+- [光箱顯示](https://github.com/charlesc/YouTube-STTS/blob/main/demo/sample-3.jpg)
+
 
 ## 安裝
 
 1. 複製此程式庫:
    ```
-   git clone https://github.com/yourusername/youtube-video-screenshot-app.git
-   cd youtube-video-screenshot-app
+   git clone https://github.com/charlesc/YouTube-STTS.git
+   cd YouTube-STTS
    ```
 
 2. 安裝依賴:
