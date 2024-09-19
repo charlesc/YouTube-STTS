@@ -5,7 +5,7 @@
 *.db
 
 # Screenshots
-static/screenshots/**
+static/screenshots/*
 
 
 # Byte-compiled / optimized / DLL files
