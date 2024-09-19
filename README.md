@@ -1,6 +1,7 @@
 # YouTube Video Screenshot-Transcription-Translation-Summary App
 
 這是一個用於處理YouTube影片的Flask應用程序。它可以下載影片,生成截圖,提取聲音,進行轉錄和翻譯,並提供影片摘要。
+(透過 Replit Agent 製作原型程式，以及數百次與 Claude 的愉快交談@@)
 
 ## 功能
 
