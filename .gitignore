@@ -4,8 +4,8 @@
 # Databases
 *.db
 
-# Screenshots
 static/screenshots/*
+!static/screenshots/.gitkeep
 
 
 # Byte-compiled / optimized / DLL files
