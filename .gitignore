@@ -1,3 +1,13 @@
+# Logs
+*.log
+
+# Databases
+*.db
+
+# Screenshots
+static/screenshots/**
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
