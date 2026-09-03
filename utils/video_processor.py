@@ -201,11 +201,42 @@ def _pick_subtitle_language(info):
     整個 extract_info(download=True) 呼叫還是會直接拋例外，連已經下載成功
     的影片本體都作廢。先探查、只下載真正會用到的那一種語言，能把字幕相關
     的請求數從最多 4 次降到最多 1 次，同時也不會再被用不到的語言拖累。
+
+    真實踩過的 bug（duuqEo1r8rU，一支英文遊戲實況）：這支影片完全沒有
+    人工字幕，automatic_captions 卻有 157 種語言，因為 YouTube 會把
+    語音辨識產生的原文自動字幕，再機器翻譯成上百種語言全部塞進
+    automatic_captions（每個翻譯版本的下載網址都帶著 `tlang=<目標語言>`
+    參數，只有真正的語音辨識原文那條沒有）。舊版邏輯直接照 SUBTITLE_LANGS
+    的優先順序（zh-TW、zh-Hant 排在 en 前面）去挑，結果挑到 YouTube
+    自動翻譯出來的 zh-Hant 版本，被當成「原文」存進資料庫、顯示在網頁的
+    原文欄位——不但語言顯示錯誤（英文影片卻顯示中文「原文」），內容還等於
+    被機器翻譯了兩次（YouTube 翻一次、我們自己的 LLM 又翻一次），品質變差。
+
+    修法：只要知道影片本身的語言（yt-dlp 的 info['language']，YouTube
+    回報的實際語音語言），就優先用那個語言的字幕/自動字幕——這對
+    automatic_captions 尤其重要，因為只有語言代碼等於 info['language']
+    的那條，才是語音辨識直接產生的原文，其他都是「二手翻譯」，不能拿來
+    當「原文」使用。只有在不知道影片本身語言時（info['language'] 缺漏，
+    實務上偶爾會發生），才退回用 SUBTITLE_LANGS 的偏好順序挑一個「有」的
+    語言；人工字幕至少是人工提供的文字、不是機器二次翻譯，用這個順序挑選
+    風險較低，但 automatic_captions 在這個 fallback 分支還是可能挑到
+    翻譯版本，這是已知、暫時無法根治的限制（除非改成連 tlang 參數都檢查）。
     """
     manual = info.get('subtitles') or {}
     auto = info.get('automatic_captions') or {}
+    native_lang = info.get('language')
+
+    if native_lang:
+        if native_lang in manual:
+            return native_lang
+        if native_lang in auto:
+            return native_lang
+
     for lang in config.SUBTITLE_LANGS:
-        if lang in manual or lang in auto:
+        if lang in manual:
+            return lang
+    for lang in config.SUBTITLE_LANGS:
+        if lang in auto:
             return lang
     return None
 

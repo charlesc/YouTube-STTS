@@ -111,6 +111,14 @@ def _merge_into_sentences(cues, max_duration_seconds=_MAX_MERGED_DURATION_SECOND
     buf_start, buf_end, buf_words = None, None, []
 
     for start, end, text in cues:
+        # 人工字幕跟 YouTube 自動字幕都有可能用開頭的 ">>" 標記換人開始
+        # 講話。這裡強制在這個 cue 開始新的一句、不要跟前一句合併——否則
+        # ">>" 會被埋進合併後句子的中間，main.py:process_video_data() 之後
+        # 沒辦法可靠地偵測到「這裡換人了」。
+        if text.startswith('>>') and buf_words:
+            result.append((buf_start, buf_end, ' '.join(buf_words)))
+            buf_start, buf_end, buf_words = None, None, []
+
         if buf_start is None:
             buf_start = start
         buf_end = end

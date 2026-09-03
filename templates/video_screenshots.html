@@ -56,6 +56,7 @@
                     {% if item.translated_subtitles %}
                     <p class="text-sm text-gray-600 mt-2"></p>
                     {% for subtitle in item.translated_subtitles %}
+                    {% if subtitle.speaker_changed %}<p class="text-xs text-blue-500 font-semibold mt-1">🔄 換人講了</p>{% endif %}
                     <p class="text-sm">{{ subtitle.text }}</p>
                     {% endfor %}
                     {% endif %}
@@ -64,6 +65,7 @@
                     {% if item.original_subtitles %}
                     <p class="text-sm text-gray-600 mt-2">原文:</p>
                     {% for subtitle in item.original_subtitles %}
+                    {% if subtitle.speaker_changed %}<p class="text-xs text-blue-500 font-semibold mt-1">🔄 換人講了</p>{% endif %}
                     <p class="text-sm">{{ subtitle.text }}</p>
                     {% endfor %}
                     {% endif %}
