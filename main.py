@@ -171,6 +171,27 @@ def delete_video_route(youtube_id):
 
 
 
+_SPEAKER_CHANGE_PREFIX_RE = re.compile(r'^>>\s*')
+
+
+def _split_speaker_change_marker(text):
+    """人工字幕跟 YouTube 自動字幕都有可能用開頭的 ">>" 標記換人開始講話
+    （utils/vtt_cleaner.py 的 clean_vtt() 會保留這個標記、並確保它一定在
+    某個 cue 的最開頭，不會被合併埋進句子中間）。這裡把它從要顯示的文字
+    裡拆出來，轉成一個獨立的旗標，讓模板可以顯示「換人講了」之類的提示，
+    而不是把 ">>" 原封不動秀給使用者看。
+
+    只在原文（transcription）這邊做這件事是刻意的：翻譯後的文字有沒有
+    保留 ">>" 要看 LLM 心情（實測過 ">> This is Andrew..." 被翻成「我叫
+    安德魯」，">>" 這個換人講話的慣例直接被吞掉、語意還跟著跑掉），原文
+    字幕/轉錄結果沒有經過 LLM 改寫，是唯一可以穩定偵測的來源。
+    """
+    m = _SPEAKER_CHANGE_PREFIX_RE.match(text)
+    if not m:
+        return False, text
+    return True, text[m.end():]
+
+
 def process_video_data(video_info):
     screenshots = video_info['screenshots']
     # 用 `or ''` 而非 `.get(key, '')`：資料庫裡的 transcription/translation
@@ -179,31 +200,42 @@ def process_video_data(video_info):
     # 後面的正則表達式吃到 None 會直接丟 TypeError。
     translation = video_info.get('translation') or ''
     transcription = video_info.get('transcription') or ''
-    
+
     # 解析翻譯後的字幕
     translated_parts = re.findall(r'(\d{2}:\d{2}:\d{2}\.\d{3}) --> (\d{2}:\d{2}:\d{2}\.\d{3})\n(.*?)(?:\n\n|$)', translation, re.DOTALL)
-    
+
     # 解析原始字幕
     original_parts = re.findall(r'(\d{2}:\d{2}:\d{2}\.\d{3}) --> (\d{2}:\d{2}:\d{2}\.\d{3})\n(.*?)(?:\n\n|$)', transcription, re.DOTALL)
-    
+
+    # 原文（transcription）每個 cue 是否為換人講話的開頭，依序記錄下來，
+    # 之後套用到翻譯字幕的對應位置——process_vtt() 保證翻譯後的 VTT 跟原文
+    # 用同一組時間戳記、一對一對應，所以兩邊用同樣的索引位置就能對齊。
+    original_speaker_changes = [_SPEAKER_CHANGE_PREFIX_RE.match(text) is not None for _, _, text in original_parts]
+
     # 將字幕轉換為更易於處理的格式
-    translated_subtitles = [
-        {
+    translated_subtitles = []
+    for i, (start, end, text) in enumerate(translated_parts):
+        _, cleaned_text = _split_speaker_change_marker(text.strip())
+        speaker_changed = (
+            original_speaker_changes[i] if i < len(original_speaker_changes)
+            else _SPEAKER_CHANGE_PREFIX_RE.match(text.strip()) is not None
+        )
+        translated_subtitles.append({
             'start': timestamp_to_seconds(start),
             'end': timestamp_to_seconds(end),
-            'text': text.strip()
-        }
-        for start, end, text in translated_parts
-    ]
-    
-    original_subtitles = [
-        {
+            'text': cleaned_text,
+            'speaker_changed': speaker_changed,
+        })
+
+    original_subtitles = []
+    for start, end, text in original_parts:
+        speaker_changed, cleaned_text = _split_speaker_change_marker(text.strip())
+        original_subtitles.append({
             'start': timestamp_to_seconds(start),
             'end': timestamp_to_seconds(end),
-            'text': text.strip()
-        }
-        for start, end, text in original_parts
-    ]
+            'text': cleaned_text,
+            'speaker_changed': speaker_changed,
+        })
     
     # 將截圖與字幕配對
     paired_data = []

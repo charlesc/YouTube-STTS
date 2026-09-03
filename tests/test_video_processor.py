@@ -309,6 +309,55 @@ def test_pick_subtitle_language_ignores_languages_not_in_priority_list():
     assert vp._pick_subtitle_language(info) is None
 
 
+# 迴歸測試：真實踩過的 bug（duuqEo1r8rU，一支完全沒有人工字幕的英文影片）。
+# YouTube 把語音辨識出來的英文原文自動字幕，又機器翻譯成上百種語言塞進
+# automatic_captions（包含 zh-Hant），舊版邏輯直接照 SUBTITLE_LANGS 的
+# 優先順序（zh-Hant 排在 en 前面）去挑，結果把 YouTube 自動翻譯出來的
+# 中文版本當成「原文」，網頁上「原文」欄位整個顯示成中文、內容還被機器
+# 翻譯了兩次。修法是優先採用 info['language']（yt-dlp 回報的影片本身
+# 語音語言），因為 automatic_captions 裡只有這個語言代碼對應的那條，才是
+# 語音辨識直接產生、沒有被再翻譯過的原文。
+def test_pick_subtitle_language_prefers_native_language_over_translated_auto_captions():
+    info = {
+        'language': 'en',
+        'subtitles': {},
+        # 157 種自動翻譯語言的簡化版：只留下真正會造成問題的 zh-Hant，
+        # 跟語音辨識原文所在的 en。
+        'automatic_captions': {'en': [{}], 'zh-Hant': [{}]},
+    }
+    assert vp._pick_subtitle_language(info) == 'en'
+
+
+def test_pick_subtitle_language_prefers_native_language_over_manual_priority_list():
+    info = {
+        'language': 'en',
+        'subtitles': {'en': [{}], 'zh-TW': [{}]},
+        'automatic_captions': {},
+    }
+    assert vp._pick_subtitle_language(info) == 'en'
+
+
+def test_pick_subtitle_language_falls_back_to_priority_list_when_native_language_unavailable():
+    # info['language'] 存在，但那個語言剛好沒有任何字幕/自動字幕可用
+    # （不常見，但 yt-dlp 回報的 language 不保證跟可用字幕語言一致）；
+    # 這時退回舊有的 SUBTITLE_LANGS 優先順序邏輯。
+    info = {
+        'language': 'fr',
+        'subtitles': {'en': [{}], 'zh-TW': [{}]},
+        'automatic_captions': {},
+    }
+    assert vp._pick_subtitle_language(info) == 'zh-TW'
+
+
+def test_pick_subtitle_language_falls_back_to_priority_list_when_native_language_missing():
+    info = {
+        'subtitles': {},
+        'automatic_captions': {'en': [{}], 'zh-Hant': [{}]},
+    }
+    # 沒有 info['language'] 可用時沒有更好的依據，退回舊行為。
+    assert vp._pick_subtitle_language(info) == 'zh-Hant'
+
+
 # --- 語音轉錄後端（config.TRANSCRIPTION_BACKEND）---
 
 def test_pick_speech_locale_maps_detected_language_to_locale(monkeypatch):
