@@ -7,3 +7,5 @@ opencv_python==4.8.1.78
 opencv_python_headless==4.10.0.84
 Pillow==10.4.0
 yt_dlp==2024.8.6
+langdetect==1.0.9
+bleach==6.4.0

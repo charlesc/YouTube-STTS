@@ -4,15 +4,27 @@ import json
 import glob
 import logging
 
-logging.basicConfig(level=logging.INFO)
+import config
+
 logger = logging.getLogger(__name__)
 
 
+DATABASE_NAME = config.DATABASE_NAME
 
-DATABASE_NAME = 'videos.db'
+
+def get_connection():
+    """統一的連線建立方式：加上 timeout，讓多請求同時寫入時互相等待而不是立刻
+    丟出 'database is locked'。
+
+    （原本考慮順便開啟 WAL 模式，但 journal_mode 是寫進資料庫檔案標頭的永久設定，
+    第一次連線就會直接改寫既有的 videos.db 檔案本身；只加 timeout 不會有這個
+    副作用，維持在「呼叫端安全」的前提下降低鎖等待的失敗率。）
+    """
+    return sqlite3.connect(DATABASE_NAME, timeout=10)
+
 
 def init_db():
-    conn = sqlite3.connect(DATABASE_NAME)
+    conn = get_connection()
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS videos
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,7 +46,7 @@ def init_db():
     conn.close()
 
 def add_video(video_info):
-    conn = sqlite3.connect(DATABASE_NAME)
+    conn = get_connection()
     c = conn.cursor()
     c.execute(
         '''INSERT INTO videos (youtube_id, title, description, creator, timestamp, duration, language, processed_at, screenshots, transcription, translation, summary, subtitle_used)
@@ -60,7 +72,7 @@ def add_video(video_info):
     return video_id
 
 def get_all_videos(youtube_id=None):
-    conn = sqlite3.connect(DATABASE_NAME)
+    conn = get_connection()
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
 
@@ -92,7 +104,7 @@ def get_all_videos(youtube_id=None):
         return videos
 
 def update_video(video_info):
-    conn = sqlite3.connect(DATABASE_NAME)
+    conn = get_connection()
     c = conn.cursor()
     c.execute(
         '''UPDATE videos
@@ -116,12 +128,13 @@ def update_video(video_info):
     conn.close()
 
 def search_videos(query):
-    conn = sqlite3.connect(DATABASE_NAME)
+    conn = get_connection()
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
 
     c.execute(
-        '''SELECT id, youtube_id, title, MAX(processed_at) as processed_at, screenshots
+        '''SELECT id, youtube_id, title, description, creator, timestamp, duration, language,
+                  MAX(processed_at) as processed_at, screenshots, subtitle_used
                  FROM videos
                  WHERE title LIKE ?
                  GROUP BY youtube_id
@@ -131,13 +144,13 @@ def search_videos(query):
     for row in c.fetchall():
         video = dict(row)
         video['screenshots'] = json.loads(video['screenshots'])
-        video['subtitle_used'] = bool(video['subtitle_used'])  # 確保是布爾值
+        video['subtitle_used'] = bool(video.get('subtitle_used', False))
         videos.append(video)
     conn.close()
     return videos
 
 def delete_video(youtube_id):
-    conn = sqlite3.connect(DATABASE_NAME)
+    conn = get_connection()
     c = conn.cursor()
     
     try:
@@ -151,7 +164,7 @@ def delete_video(youtube_id):
             screenshots = json.loads(result[0])
             
             # 刪除截圖文件
-            screenshots_dir = 'static/screenshots'
+            screenshots_dir = config.UPLOAD_FOLDER
             logger.debug(f"截圖目錄: {screenshots_dir}")
             
             # 使用 glob 查找匹配的文件
@@ -188,7 +201,7 @@ def delete_video(youtube_id):
 
 
 def dump_database():
-    conn = sqlite3.connect(DATABASE_NAME)
+    conn = get_connection()
     c = conn.cursor()
     c.execute('SELECT * FROM videos')
     rows = c.fetchall()

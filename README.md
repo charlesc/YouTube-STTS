@@ -47,13 +47,33 @@ B. 若沒有合適的字幕檔案：
    - 在macOS上 (使用Homebrew): `brew install ffmpeg`
    - 在Windows上: 下載FFmpeg並將其添加到系統PATH中
 
-4. 安裝Ollama (使用本地端AI模型)和 mlx-whisper（在 Apple M1/2/3/4處理器上進行聲音轉錄）:
+4. 安裝 mlx-whisper（在 Apple M1/2/3/4 處理器上進行聲音轉錄，僅在沒有字幕、需要轉錄時才會用到）:
+   - 請參考[mlx-whisper 官方文件](https://pypi.org/project/mlx-whisper/)
+
+5. 翻譯／摘要後端（擇一）:
+
+   **A. Apple Intelligence（預設，`TRANSLATION_BACKEND=apple`）**——完全地端、免額外服務，但只能在有 Apple Intelligence 的 Mac（macOS 26+，系統設定裡「Apple Intelligence」已啟用）上跑：
+   ```bash
+   cd apple_llm_bridge
+   swift build -c release   # 只需 Xcode Command Line Tools，不用裝完整 Xcode.app
+   cd ..
+   ```
+   注意：`FoundationModels`（Apple Intelligence 用的框架）有內建、無法關閉的內容安全防護，翻譯政治／社會議題等敏感主題的內容時可能會被擋下（`guardrail_violation`）。程式遇到這種情況會自動改用 Ollama 重試，所以**建議即使主要用 Apple 後端，也把下面的 Ollama 設定跑起來當備援**。
+
+   **B. Ollama（`TRANSLATION_BACKEND=ollama`，或 Apple 後端的備援）**：
    - 請按照[Ollama官方文件](https://github.com/jmorganca/ollama)的說明進行安裝。
-   - 請參考[mlx-whispere官方文件](https://pypi.org/project/mlx-whisper/)
+   - 確保 Ollama 服務正在運行，並監聽在 `http://localhost:11434`（`ollama serve`）。
+   - 拉取模型：`ollama pull gemma2:9b`（或透過 `OLLAMA_MODEL_NAME` 環境變數換成別的模型）。
 
 ## 配置
 
-1. 確保Ollama服務正在運行,並監聽在`http://localhost:11434`。
+所有設定值集中在 `config.py`，都可以用環境變數覆寫，例如：
+
+```bash
+export TRANSLATION_BACKEND=apple      # 或 ollama
+export FLASK_DEBUG=true               # 開發時才需要
+export OLLAMA_MODEL_NAME=gemma2:9b
+```
 
 ## 使用方法
 
@@ -70,22 +90,24 @@ B. 若沒有合適的字幕檔案：
 
 ## 程式結構
 
-- `main.py`: Flask應用的主入口
-- `video_processor.py`: 影片處理的核心邏輯
-- `vtt_translator.py`: 字幕處理和翻譯功能
-- `image_processor.py`: 圖像處理和去重複功能
+- `main.py`: Flask應用的主入口，`/process_video` 以背景執行緒處理、前端輪詢 `/job_status/<id>` 取得結果
+- `config.py`: 集中管理所有環境相關設定（可用環境變數覆寫）
+- `utils/video_processor.py`: 影片處理的核心邏輯
+- `utils/vtt_translator.py`: 字幕處理和翻譯/摘要功能，依 `TRANSLATION_BACKEND` 分派到 Apple Intelligence 或 Ollama
+- `utils/image_processor.py`: 圖像處理和去重複功能
 - `database.py`: 資料庫操作
+- `apple_llm_bridge/`: 獨立的 Swift Package，橋接地端 Apple Intelligence（`FoundationModels` framework）
 - `templates/`: HTML模板
 - `static/`: 靜態文件 (CSS, JS, 截圖等)
+- `tests/`: pytest 測試（外部依賴皆用 mock 隔離）
 
 ## 技術堆疊
 
-- Python
-- Flask
+- Python / Flask
 - OpenCV
 - yt-dlp
-- mlx-whisper
-- Ollama
+- mlx-whisper（聲音轉錄）
+- Apple Intelligence（`FoundationModels`，透過 `apple_llm_bridge/` 這個 Swift Package）／Ollama（可切換）
 - SQLite
 
 ## 注意事項

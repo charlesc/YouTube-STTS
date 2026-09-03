@@ -7,41 +7,72 @@ document.addEventListener('DOMContentLoaded', () => {
     const searchForm = document.getElementById('searchForm');
     const searchQuery = document.getElementById('searchQuery');
     
+    const JOB_POLL_INTERVAL_MS = 3000;
+
+    function pollJobStatus(jobId) {
+        const timer = setInterval(async () => {
+            try {
+                const response = await fetch(`/job_status/${jobId}`);
+                if (!response.ok) {
+                    clearInterval(timer);
+                    if (message) message.textContent = '找不到這個處理工作，請重新提交。';
+                    return;
+                }
+
+                const job = await response.json();
+                if (job.status === 'processing') {
+                    return; // 繼續等待下一次輪詢
+                }
+
+                clearInterval(timer);
+
+                if (job.status === 'done') {
+                    if (message) message.textContent = '視頻處理成功！';
+                    try {
+                        const updatedVideos = await fetch('/api/videos');
+                        const videoData = await updatedVideos.json();
+                        updateVideoTable(videoData);
+                    } catch (error) {
+                        console.error('更新視頻列表時發生錯誤:', error);
+                        if (message) message.textContent = '視頻處理成功，但更新列表失敗。';
+                    }
+                } else {
+                    if (message) message.textContent = job.error || '處理視頻時發生錯誤。';
+                }
+            } catch (error) {
+                clearInterval(timer);
+                console.error('查詢處理進度時發生錯誤:', error);
+                if (message) message.textContent = '查詢處理進度時發生錯誤。';
+            }
+        }, JOB_POLL_INTERVAL_MS);
+    }
+
     if (videoForm) {
         videoForm.addEventListener('submit', async (e) => {
             e.preventDefault();
-            
-            if (message) message.textContent = '正在處理視頻...';
-            
+
+            if (message) message.textContent = '正在處理視頻，這可能需要幾分鐘，請稍候...';
+
             const youtubeUrlValue = youtubeUrl ? youtubeUrl.value.trim() : '';
             const formData = new FormData();
             formData.append('youtube_url', youtubeUrlValue);
             formData.append('capture_interval', captureInterval ? captureInterval.value : '10');
-            
+
             try {
                 const response = await fetch('/process_video', {
                     method: 'POST',
                     body: formData
                 });
-                
+
                 console.log('Response Status:', response.status);
 
                 if (response.ok) {
                     const result = await response.json();
                     console.log('Server response:', result);
-                    if (result.status === 'success') {
-                        if (message) message.textContent = '視頻處理成功！';
-                        // 更新視頻列表
-                        try {
-                            const updatedVideos = await fetch('/api/videos');
-                            const videoData = await updatedVideos.json();
-                            updateVideoTable(videoData);
-                        } catch (error) {
-                            console.error('更新視頻列表時發生錯誤:', error);
-                            if (message) message.textContent = '視頻處理成功，但更新列表失敗。';
-                        }
+                    if (result.job_id) {
+                        pollJobStatus(result.job_id);
                     } else {
-                        if (message) message.textContent = result.message || '處理視頻時發生錯誤。';
+                        if (message) message.textContent = '處理視頻時發生錯誤。';
                     }
                 } else {
                     const errorResult = await response.json();
