@@ -196,6 +196,35 @@ def test_translate_batch_numbers_cues_and_preserves_order(monkeypatch):
     assert result == ["你好", "世界"]
 
 
+def test_translate_batch_reports_progress_per_batch(monkeypatch):
+    _use_ollama_backend(monkeypatch)
+
+    class FakeChoice:
+        def __init__(self, content):
+            self.message = types.SimpleNamespace(content=content)
+
+    class FakeResponse:
+        def __init__(self, content):
+            self.choices = [FakeChoice(content)]
+
+    monkeypatch.setattr(vt.client.chat.completions, "create",
+                         lambda model, messages: FakeResponse("[1] 你好"))
+
+    # 每句都超過 _TRANSLATION_BATCH_CHAR_LIMIT 的一半，逼出兩個批次。
+    long_sentence = "A" * (vt._TRANSLATION_BATCH_CHAR_LIMIT // 2 + 10)
+    progress_messages = []
+
+    vt.translate_batch(
+        [long_sentence, long_sentence], "English", "Traditional Chinese",
+        on_progress=progress_messages.append,
+    )
+
+    assert progress_messages == [
+        "正在翻譯字幕（第 1/2 批）...",
+        "正在翻譯字幕（第 2/2 批）...",
+    ]
+
+
 def test_translate_batch_falls_back_to_per_cue_when_response_unparseable(monkeypatch):
     _use_ollama_backend(monkeypatch)
 
@@ -542,7 +571,7 @@ def test_summarize_uses_map_reduce_for_long_text(monkeypatch):
 
     def fake_generate(prompt):
         calls.append(prompt)
-        if "請用繁體中文，以三到五個重點條列" in prompt:
+        if "以一段 2 到 3 句話的簡短段落" in prompt:
             return "- 段落重點"
         return "<ul><li>最終摘要</li></ul>"
 
@@ -557,3 +586,113 @@ def test_summarize_uses_map_reduce_for_long_text(monkeypatch):
     # 送進模型的每個 prompt 都不該包含完整的原始長文字
     assert all(len(p) < len(long_text) for p in calls)
     assert "最終摘要" in result
+
+
+def test_summarize_reports_progress(monkeypatch):
+    monkeypatch.setattr(vt, "_generate", lambda prompt: "<ul><li>摘要</li></ul>")
+
+    progress_messages = []
+    vt.summarize("一段不長的逐字稿內容。", on_progress=progress_messages.append)
+
+    assert progress_messages == ["正在產生摘要..."]
+
+
+def test_summarize_reports_progress_for_map_reduce(monkeypatch):
+    sentence = "這是一句大約十個字的句子。"
+    long_text = sentence * 300
+
+    def fake_generate(prompt):
+        if "以一段 2 到 3 句話的簡短段落" in prompt:
+            return "- 段落重點"
+        return "<ul><li>最終摘要</li></ul>"
+
+    monkeypatch.setattr(vt, "_generate", fake_generate)
+
+    progress_messages = []
+    vt.summarize(long_text, on_progress=progress_messages.append)
+
+    chunk_count = len(vt._split_into_chunks(long_text))
+    assert progress_messages[:-1] == [
+        f"逐字稿較長，正在分段摘要（第 {i + 1}/{chunk_count} 段）..." for i in range(chunk_count)
+    ]
+    assert progress_messages[-1] == "正在合併分段摘要..."
+
+
+# --- 摘要品質：巢狀結構、"重點"數量上限 ---
+#
+# 真實案例：原本的 prompt 只說「用 <ul><li> 格式」，沒有規範巢狀結構，
+# 模型會把「主題/重點/結論/總結」四個部分全部攤平成同一層的 <li>；分段
+# 摘要合併時更明顯——模型常常把每段落各自的 3-5 點原封不動串接，變成
+# 十幾二十點的落落長清單，而不是真的重新統整。改用 <h4> 分節的固定模板 +
+# 明確的數量上限指示，並加上 _cap_bullet_points() 作為不依賴模型自律的
+# 保險。
+
+def test_summarize_uses_distinct_prompt_for_single_chunk_vs_merge(monkeypatch):
+    """單一段落（不需要 map-reduce）跟合併分段摘要，應該用不同的 prompt——
+    合併步驟收到的是「好幾段摘要」，需要的是統整、去重複，跟單純摘要一段
+    完整文字的情境不一樣。"""
+    captured_prompts = []
+
+    def fake_generate(prompt):
+        captured_prompts.append(prompt)
+        return "<ul><li>摘要</li></ul>"
+
+    monkeypatch.setattr(vt, "_generate", fake_generate)
+
+    vt.summarize("一段不長的逐字稿內容。")
+    assert len(captured_prompts) == 1
+    single_chunk_prompt = captured_prompts[0]
+
+    captured_prompts.clear()
+    long_text = ("這是一句大約十個字的句子。") * 300
+    vt.summarize(long_text)
+    merge_prompt = captured_prompts[-1]
+
+    assert single_chunk_prompt != merge_prompt
+    assert "統整" not in single_chunk_prompt
+    assert "統整" in merge_prompt
+
+
+def test_summarize_output_uses_headed_sections_not_flat_list(monkeypatch):
+    monkeypatch.setattr(vt, "_generate", lambda prompt: (
+        "<h4>主題</h4><p>主題內容</p>"
+        "<h4>重點</h4><ul><li>要點一</li><li>要點二</li></ul>"
+        "<h4>結論</h4><p>結論內容</p>"
+        "<h4>總結</h4><p>總結內容</p>"
+    ))
+
+    result = vt.summarize("一段不長的逐字稿內容。")
+
+    assert result.count('<h4>') == 4
+    assert '<ul><ul>' not in result  # 不該有巢狀清單
+
+
+def test_cap_bullet_points_keeps_output_unchanged_when_within_limit():
+    html = "<ul><li>一</li><li>二</li><li>三</li></ul>"
+    assert vt._cap_bullet_points(html) == html
+
+
+def test_cap_bullet_points_truncates_excess_items():
+    items = "".join(f"<li>第{i}點</li>" for i in range(1, 11))  # 10 個 <li>
+    html = f"<h4>重點</h4><ul>{items}</ul><h4>結論</h4><p>無</p>"
+
+    result = vt._cap_bullet_points(html, max_items=5)
+
+    assert result.count('<li>') == 5
+    assert "第1點" in result
+    assert "第5點" in result
+    assert "第6點" not in result
+    # 被砍掉的是多餘的 <li>，其他區塊（結論）應該保留完整。
+    assert "<h4>結論</h4><p>無</p>" in result
+
+
+def test_summarize_applies_bullet_point_cap_as_safety_net(monkeypatch):
+    """迴歸測試：分段摘要合併時，模型即使被明確要求「最多 5 點」還是可能
+    不遵守（實測踩過：直接把每段落的要點原封不動串接，變成十幾二十點）。
+    summarize() 最終回傳的內容不該依賴模型自律，一定要套用數量上限。"""
+    too_many_items = "".join(f"<li>第{i}點</li>" for i in range(1, 21))  # 20 個
+    monkeypatch.setattr(vt, "_generate", lambda prompt: f"<ul>{too_many_items}</ul>")
+
+    result = vt.summarize("一段不長的逐字稿內容。")
+
+    assert result.count('<li>') == vt._SUMMARY_MAX_BULLET_POINTS

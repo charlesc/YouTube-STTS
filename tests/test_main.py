@@ -134,6 +134,44 @@ def test_process_video_route_rejects_error_result_from_process_video(monkeypatch
     assert '影片處理失敗' in payload['error']
 
 
+def test_run_video_processing_updates_job_progress(monkeypatch):
+    """迴歸測試：process_video() 過去沒有回報進度的管道，前端輪詢
+    /job_status/<id> 在整個處理過程中只會看到固定的 'processing' 狀態，
+    看不出目前卡在哪個階段。on_progress callback 應該即時把進度寫進
+    job 狀態，且處理完成後不該殘留舊的 progress 欄位。"""
+    seen_progress_snapshots = []
+
+    def fake_process_video(url, folder, interval, on_progress=None):
+        on_progress("正在下載影片與字幕...")
+        with main._jobs_lock:
+            seen_progress_snapshots.append(dict(main._jobs.get('job-1', {})))
+        on_progress("正在翻譯字幕（第 1/1 批）...")
+        with main._jobs_lock:
+            seen_progress_snapshots.append(dict(main._jobs.get('job-1', {})))
+        return {'youtube_id': 'abc123', 'title': 'T', 'description': '',
+                'creator': '', 'timestamp': '2024-01-01T00:00:00', 'duration': '',
+                'language': 'en', 'processed_at': '2024-01-01T00:00:00',
+                'screenshots': [], 'transcription': '', 'translation': '',
+                'summary': '', 'subtitle_used': False}
+
+    monkeypatch.setattr(main, "process_video", fake_process_video)
+    monkeypatch.setattr(main, "get_all_videos", lambda youtube_id=None: None)
+    monkeypatch.setattr(main, "add_video", lambda video_info: 1)
+
+    with main._jobs_lock:
+        main._jobs['job-1'] = {'status': 'processing'}
+
+    main._run_video_processing('job-1', 'https://youtu.be/abc123', 10)
+
+    assert seen_progress_snapshots[0] == {'status': 'processing', 'progress': '正在下載影片與字幕...'}
+    assert seen_progress_snapshots[1] == {'status': 'processing', 'progress': '正在翻譯字幕（第 1/1 批）...'}
+
+    with main._jobs_lock:
+        final = main._jobs['job-1']
+    assert final['status'] == 'done'
+    assert 'progress' not in final
+
+
 def test_job_status_returns_404_for_unknown_job(monkeypatch):
     client = main.app.test_client()
     response = client.get('/job_status/does-not-exist')
