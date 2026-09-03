@@ -106,6 +106,10 @@ def test_process_video_survives_transcription_failure(tmp_path, monkeypatch):
         return output_path
 
     monkeypatch.setattr(vp, "extract_audio", fake_extract_audio)
+    # 兩個轉錄後端都模擬失敗，才會真的走到「轉錄失敗」這個分支——
+    # 否則預設的 'apple' 後端會先被嘗試（雖然對假音檔會自然失敗，但明確
+    # mock 掉比較不依賴 apple_llm_bridge 真的被建置、也比較快）。
+    monkeypatch.setattr(vp, "transcribe_audio_with_apple_speech", lambda path, locale_id: None)
     monkeypatch.setattr(vp, "transcribe_audio_with_whisper", lambda path, language=None: None)
 
     result = vp.process_video(
@@ -114,6 +118,10 @@ def test_process_video_survives_transcription_failure(tmp_path, monkeypatch):
 
     assert 'error' not in result
     assert result['translation'] == '轉錄失敗'
+    # 迴歸測試：transcribe_audio_with_whisper() 回傳 None 時，
+    # transcription 過去會直接沿用這個 None 存進資料庫（NULL），
+    # 讓 main.py:process_video_data() 讀回來時對 None 做正則比對而 500。
+    assert result['transcription'] == ''
     assert result['summary'] == '無法生成摘要'
 
 
@@ -158,3 +166,79 @@ def test_process_video_cleans_up_its_own_work_dir(tmp_path, monkeypatch):
 
     assert 'path' in captured_work_dir
     assert not vp.os.path.exists(captured_work_dir['path'])
+
+
+# --- 語音轉錄後端（config.TRANSCRIPTION_BACKEND）---
+
+def test_pick_speech_locale_maps_detected_language_to_locale(monkeypatch):
+    monkeypatch.setattr(vp, "detect_language", lambda text: "Traditional Chinese")
+    assert vp.pick_speech_locale("某段文字") == "zh-TW"
+
+    monkeypatch.setattr(vp, "detect_language", lambda text: "Korean")
+    assert vp.pick_speech_locale("某段文字") == "ko-KR"
+
+
+def test_pick_speech_locale_falls_back_to_default_for_unknown_language(monkeypatch):
+    monkeypatch.setattr(vp, "detect_language", lambda text: "Klingon")
+    assert vp.pick_speech_locale("某段文字") == "en-US"
+
+
+def test_transcribe_audio_with_apple_speech_builds_vtt_from_segments(monkeypatch):
+    monkeypatch.setattr(vp, "_call_apple_bridge", lambda payload: {
+        "status": "ok",
+        "segments": [
+            {"start": 0.0, "end": 1.5, "text": "Hello world."},
+            {"start": 1.5, "end": 3.2, "text": "Second sentence."},
+        ],
+    })
+
+    result = vp.transcribe_audio_with_apple_speech("/tmp/audio.mp3", "en-US")
+
+    assert result.startswith("WEBVTT")
+    assert "00:00:00.000 --> 00:00:01.500" in result
+    assert "Hello world." in result
+    assert "Second sentence." in result
+
+
+def test_transcribe_audio_with_apple_speech_returns_none_on_failure(monkeypatch):
+    def fake_call(payload):
+        raise vp.GenerationError("locale 不支援", reason="unsupported_locale")
+
+    monkeypatch.setattr(vp, "_call_apple_bridge", fake_call)
+
+    assert vp.transcribe_audio_with_apple_speech("/tmp/audio.mp3", "xx-XX") is None
+
+
+def test_transcribe_audio_dispatches_to_apple_backend_by_default(monkeypatch):
+    assert vp.config.TRANSCRIPTION_BACKEND == "apple"
+
+    def fail_if_called(path, language=None):
+        raise AssertionError("apple 後端成功時不應該退回 mlx-whisper")
+
+    monkeypatch.setattr(vp, "transcribe_audio_with_apple_speech", lambda path, locale_id: "WEBVTT\n\napple 轉錄結果\n")
+    monkeypatch.setattr(vp, "transcribe_audio_with_whisper", fail_if_called)
+
+    assert vp.transcribe_audio("/tmp/audio.mp3", "some english text") == "WEBVTT\n\napple 轉錄結果\n"
+
+
+def test_transcribe_audio_falls_back_to_whisper_when_apple_fails(monkeypatch):
+    """迴歸測試：apple 轉錄失敗（locale 不支援、Speech 服務未啟用、
+    binary 沒 build 等）時應該退回 mlx-whisper，而不是讓整支影片處理失敗。"""
+    assert vp.config.TRANSCRIPTION_BACKEND == "apple"
+
+    monkeypatch.setattr(vp, "transcribe_audio_with_apple_speech", lambda path, locale_id: None)
+    monkeypatch.setattr(vp, "transcribe_audio_with_whisper", lambda path, language=None: "WEBVTT\n\nwhisper 轉錄結果\n")
+
+    assert vp.transcribe_audio("/tmp/audio.mp3", "some english text") == "WEBVTT\n\nwhisper 轉錄結果\n"
+
+
+def test_transcribe_audio_skips_apple_when_backend_is_mlx_whisper(monkeypatch):
+    monkeypatch.setattr(vp.config, "TRANSCRIPTION_BACKEND", "mlx_whisper")
+
+    def fail_if_called(path, locale_id):
+        raise AssertionError("TRANSCRIPTION_BACKEND=mlx_whisper 時不該呼叫 apple 後端")
+
+    monkeypatch.setattr(vp, "transcribe_audio_with_apple_speech", fail_if_called)
+    monkeypatch.setattr(vp, "transcribe_audio_with_whisper", lambda path, language=None: "WEBVTT\n\nwhisper 轉錄結果\n")
+
+    assert vp.transcribe_audio("/tmp/audio.mp3", "some english text") == "WEBVTT\n\nwhisper 轉錄結果\n"

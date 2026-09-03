@@ -62,6 +62,25 @@ def test_process_video_data_pairs_screenshots_with_subtitles():
     assert paired[1]['original_subtitles'][0]['text'] == 'Original World'
 
 
+def test_process_video_data_handles_null_transcription_from_db():
+    """迴歸測試：轉錄失敗但字幕/翻譯仍然存在時，資料庫裡的 transcription
+    欄位會是 NULL（Python 端讀回來是 None）。process_video_data() 過去用
+    `video_info.get('transcription', '')` 讀取——這個寫法只在 key 不存在時
+    才會套用預設值，key 存在但值是 None 時不會，導致 re.findall() 收到
+    None 直接丟 TypeError，讓 /video/<id> 整頁 500。"""
+    video_info = {
+        'screenshots': [{'filename': 'a.jpg', 'timestamp': '0.00s'}],
+        'translation': "轉錄失敗",
+        'transcription': None,
+    }
+
+    paired = main.process_video_data(video_info)
+
+    assert len(paired) == 1
+    assert paired[0]['translated_subtitles'] == []
+    assert paired[0]['original_subtitles'] == []
+
+
 def test_process_video_route_starts_a_background_job(monkeypatch):
     """/process_video 不應該同步阻塞到整支影片處理完成才回應——長影片的處理
     （下載/轉錄/翻譯/截圖）可能長達數分鐘。改為立即回傳 job_id，

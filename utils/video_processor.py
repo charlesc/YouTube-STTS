@@ -6,7 +6,11 @@ import cv2
 import subprocess
 from datetime import datetime
 from utils.image_processor import remove_duplicate_images
-from utils.vtt_translator import summarize, process_vtt, extract_text_from_vtt, detect_language
+from utils.vtt_cleaner import clean_vtt
+from utils.vtt_translator import (
+    summarize, process_vtt, extract_text_from_vtt, detect_language,
+    _call_apple_bridge, GenerationError,
+)
 from database import get_all_videos
 import config
 import logging
@@ -92,6 +96,89 @@ def transcribe_audio_with_whisper(audio_path, language=None):
     return None
 
 
+# detect_language() 回傳值可能是我們自己 _LANGUAGE_NAMES 那組可讀標籤
+# （'Traditional Chinese' 等），也可能是 langdetect 沒對應到標籤時原樣
+# 回傳的 ISO 代碼（'de'、'fr' 之類）——這裡兩種形式都收，統一轉成
+# SpeechAnalyzer 認得的 locale 字串。SpeechTranscriber.supportedLocales
+# 實測涵蓋的語言比這裡列出的更多，這只列這個 app 目前用得到、外加幾個
+# 常見語言；沒對應到的一律退回 en-US。
+_SPEECH_LOCALE_MAP = {
+    'traditional chinese': 'zh-TW', 'zh-tw': 'zh-TW', 'zh-hant': 'zh-TW',
+    'simplified chinese': 'zh-CN', 'zh-cn': 'zh-CN', 'zh-hans': 'zh-CN', 'zh': 'zh-CN',
+    'english': 'en-US', 'en': 'en-US',
+    'japanese': 'ja-JP', 'ja': 'ja-JP',
+    'korean': 'ko-KR', 'ko': 'ko-KR',
+    'german': 'de-DE', 'de': 'de-DE',
+    'french': 'fr-FR', 'fr': 'fr-FR',
+    'spanish': 'es-ES', 'es': 'es-ES',
+    'italian': 'it-IT', 'it': 'it-IT',
+    'portuguese': 'pt-BR', 'pt': 'pt-BR',
+}
+
+
+def pick_speech_locale(hint_text, default='en-US'):
+    """從一段文字（通常是影片標題+簡介）猜測語音轉錄該用哪個 locale。
+
+    SpeechTranscriber 不像 whisper 會自動偵測音訊語言，呼叫前得先指定
+    locale，所以這裡借用既有的 detect_language()（沒有字幕可用時，本來
+    就需要偵測語言才能決定要不要翻譯）先猜一次語言，猜不到或沒對應到
+    支援清單就退回英文。
+    """
+    label = (detect_language(hint_text) or '').strip().lower()
+    return _SPEECH_LOCALE_MAP.get(label, default)
+
+
+def transcribe_audio_with_apple_speech(audio_path, locale_id):
+    """使用 apple_llm_bridge 的 SpeechAnalyzer（Speech framework，macOS 26+）
+    做地端語音轉錄，回傳 VTT 格式的字串——跟 transcribe_audio_with_whisper()
+    回傳格式一致，呼叫端不用理會底層是哪個轉錄後端。
+
+    純語音辨識、不是生成式模型，沒有 guardrail 疑慮；失敗（locale 不支援、
+    Apple Intelligence/Speech 服務未啟用、binary 沒 build 等）時回傳 None，
+    交給呼叫端（見 transcribe_audio()）決定要不要退回 mlx-whisper。
+    """
+    try:
+        response = _call_apple_bridge({
+            "mode": "transcribe",
+            "audio_path": os.path.abspath(audio_path),
+            "locale": locale_id,
+        })
+    except GenerationError as e:
+        logger.error(f"Apple SpeechAnalyzer 轉錄失敗（locale={locale_id}）：{e}")
+        return None
+
+    segments = response.get('segments', [])
+    if not segments:
+        logger.warning("Apple SpeechAnalyzer 沒有轉錄出任何內容")
+        return None
+
+    transcription = "WEBVTT\n\n"
+    for seg in segments:
+        start = format_timestamp(seg['start'])
+        end = format_timestamp(seg['end'])
+        text = seg['text'].strip()
+        if text:
+            transcription += f"{start} --> {end}\n{text}\n\n"
+    return transcription
+
+
+def transcribe_audio(audio_path, language_hint_text):
+    """依 config.TRANSCRIPTION_BACKEND 分派語音轉錄後端。
+
+    'apple' 失敗時自動退回 mlx-whisper（如果環境裡真的有裝、能用的話）——
+    跟翻譯／摘要那邊 Apple 後端失敗會自動退回 Ollama 是同一種設計精神：
+    單一段落/單一後端的問題不該讓整支影片直接處理失敗。
+    """
+    if config.TRANSCRIPTION_BACKEND == 'apple':
+        locale_id = pick_speech_locale(language_hint_text)
+        logger.info(f"使用 Apple SpeechAnalyzer 轉錄，locale={locale_id}")
+        result = transcribe_audio_with_apple_speech(audio_path, locale_id)
+        if result:
+            return result
+        logger.warning("Apple SpeechAnalyzer 轉錄失敗，改用 mlx-whisper 重試")
+    return transcribe_audio_with_whisper(audio_path)
+
+
 def process_video(youtube_url, output_folder, capture_interval=10):
     # 每次請求都用獨立的暫存工作目錄，避免多支影片同時處理時互相覆寫
     # temp_video.mp4 / temp_audio.mp3 / 字幕檔等固定檔名。
@@ -102,6 +189,11 @@ def process_video(youtube_url, output_folder, capture_interval=10):
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': os.path.join(work_dir, 'video.%(ext)s'),
         'writesubtitles': True,
+        # 很多影片沒有人工上傳的字幕，只有 YouTube 自己產生的自動字幕。
+        # 開啟這個選項後，yt-dlp 對 subtitleslangs 裡每個語言會「有人工字幕
+        # 就用人工的，沒有才退回自動字幕」，而不是完全略過沒有人工字幕的
+        # 語言、直接掉到後面的語音轉錄（轉錄還需要本地端模型且較慢）。
+        'writeautomaticsub': True,
         'subtitleslangs': config.SUBTITLE_LANGS,
     }
 
@@ -137,6 +229,11 @@ def process_video(youtube_url, output_folder, capture_interval=10):
             with open(subtitle_path, 'r', encoding='utf-8') as file:
                 subtitle_content = file.read()
 
+            # YouTube 自動字幕是「滾動式」格式（同一句話重複出現好幾次），
+            # 對已經乾淨的人工字幕這一步基本上是 no-op，所以兩種來源統一都
+            # 過一次，不需要另外判斷這份字幕是人工的還是自動產生的。
+            subtitle_content = clean_vtt(subtitle_content)
+
             detected_language = detect_language(extract_text_from_vtt(subtitle_content))
             translation, translated_text = process_vtt(subtitle_content, detected_language)
             summary = summarize(translated_text)
@@ -151,7 +248,7 @@ def process_video(youtube_url, output_folder, capture_interval=10):
 
             if audio_path and os.path.exists(audio_path):
                 logger.info(f"開始處理音頻: {audio_path}")
-                transcription = transcribe_audio_with_whisper(audio_path)
+                transcription = transcribe_audio(audio_path, video_title + ' ' + video_description)
                 if transcription:
                     detected_language = detect_language(extract_text_from_vtt(transcription))
                     logger.info(f"檢測到的語言: {detected_language}")
@@ -166,6 +263,8 @@ def process_video(youtube_url, output_folder, capture_interval=10):
 
                 else:
                     logger.error("轉錄失敗")
+                    transcription = ''  # transcribe_audio_with_whisper() 失敗時回傳 None，
+                                        # 存進資料庫會變成 NULL，讀回來時害顯示頁面的字串處理整個炸掉。
                     translation, summary = "轉錄失敗", "無法生成摘要"
             else:
                 logger.error(f"音頻提取失敗或文件不存在: {output_audio_path}")

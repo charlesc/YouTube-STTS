@@ -162,8 +162,12 @@ def delete_video_route(youtube_id):
 
 def process_video_data(video_info):
     screenshots = video_info['screenshots']
-    translation = video_info.get('translation', '')
-    transcription = video_info.get('transcription', '')
+    # 用 `or ''` 而非 `.get(key, '')`：資料庫裡的 transcription/translation
+    # 欄位可能存的是 NULL（例如轉錄失敗那次留下的紀錄），這種情況下 key 是
+    # 存在的、只是值為 None，`.get(key, default)` 不會套用 default，
+    # 後面的正則表達式吃到 None 會直接丟 TypeError。
+    translation = video_info.get('translation') or ''
+    transcription = video_info.get('transcription') or ''
     
     # 解析翻譯後的字幕
     translated_parts = re.findall(r'(\d{2}:\d{2}:\d{2}\.\d{3}) --> (\d{2}:\d{2}:\d{2}\.\d{3})\n(.*?)(?:\n\n|$)', translation, re.DOTALL)

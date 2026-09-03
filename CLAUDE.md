@@ -15,8 +15,9 @@ python main.py
 
 - 服務執行於 `http://0.0.0.0:5001`（可用 `FLASK_HOST`/`FLASK_PORT` 覆寫），`debug` 預設關閉（`FLASK_DEBUG=true` 才開）。
 - 需要系統 PATH 中有 `ffmpeg`（透過 `subprocess` 進行聲音擷取）。
-- 需要 `mlx-whisper`（僅限 Apple Silicon）以進行本地端聲音轉錄，只有在**沒有字幕、需要轉錄**時才會被 import（延遲載入，`utils/video_processor.py:transcribe_audio_with_whisper`）——模型倉庫 `WHISPER_MODEL_REPO`（預設 `mlx-community/whisper-large-v3-mlx`）會在第一次使用時下載並快取。
+- 語音轉錄後端由 `config.TRANSCRIPTION_BACKEND` 決定，預設 `'apple'`（地端 `Speech`/`SpeechAnalyzer`，見下方「語音轉錄後端」）；`'mlx_whisper'` 只在明確切換或 apple 轉錄失敗時才會被 import（延遲載入，`utils/video_processor.py:transcribe_audio_with_whisper`）——模型倉庫 `WHISPER_MODEL_REPO`（預設 `mlx-community/whisper-large-v3-mlx`）會在第一次使用時下載並快取。**用得到 `mlx-whisper` 的話，強烈建議用專屬的 conda/venv 環境跑這個專案**，不要用共用的 `base` 環境——`mlx-whisper` 依賴的 `numba` 要求 `numpy<2.0`（`requirements.txt` 已經釘 `numpy==1.24.3`），共用環境很容易因為其他工具把 numpy 動到 2.x 而讓 `mlx_whisper` 整個 import 失敗（`ImportError: Numba needs NumPy 2.0 or less`），修法是重新建一個乾淨的專屬環境裝 `requirements.txt`，而不是直接在共用環境裡降版 numpy（風險是波及其他不相關的工具）。預設的 `'apple'` 後端完全不需要 `mlx-whisper`/`numpy`/`numba` 這條依賴鏈，這個問題只有明確切到 `'mlx_whisper'` 後端才會遇到。
 - 翻譯／摘要後端由 `config.TRANSLATION_BACKEND` 決定，預設 `'apple'`，見下方「翻譯／摘要後端」。
+- `requirements.txt` 裡 `yt_dlp` 是 `>=` 而非 `==` 釘死版本，故意的：YouTube 常改防機器人機制，pin 死的舊版 yt-dlp 過一陣子就會開始 403/429，需要定期 `pip install --upgrade yt-dlp`。`openai` 這個套件也曾經因為版本太舊（1.46.0）跟新版 `httpx` 不相容（`Client.__init__() got an unexpected keyword argument 'proxies'`）而整個 import 失敗，現在已更新到驗證過可用的版本。
 - 執行 `pytest`（`pytest.ini` 已設定 `testpaths = tests`）；測試都用 mock/monkeypatch 隔離外部依賴（Ollama client、apple_llm_bridge 的 subprocess、yt_dlp、cv2 等），不需要真的裝 Ollama、mlx-whisper 或 build 好 Swift 才能跑。
 
 ## 架構
@@ -24,8 +25,8 @@ python main.py
 **整條處理管線由 `utils/video_processor.py` 中的 `process_video()` 一手包辦**，由 `main.py` 的 `/process_video` route（背景執行緒）呼叫。理解這個函式就等於理解整個應用程式的核心：
 
 1. 每次呼叫先用 `tempfile.mkdtemp()` 建立**獨立的工作目錄**（`work_dir`），所有下載/中間檔案都放在裡面——避免多支影片同時處理時互相覆寫固定檔名。結束時（無論成功或失敗）用 `shutil.rmtree` 整個刪除。
-2. `yt-dlp` 將影片下載到 `work_dir/video.mp4`，並依 `config.SUBTITLE_LANGS`（預設 `['zh-TW', 'zh-Hant', 'en', 'ko', 'ja']`，此為優先順序）嘗試抓字幕檔 `work_dir/video.<lang>.vtt`。
-3. **字幕優先策略**：若上述任一語言的字幕檔存在，就直接使用（`subtitle_used=True`），不進行聲音轉錄。否則透過 `ffmpeg` 擷取聲音，再以 `mlx_whisper.transcribe(...)` 進行本地端轉錄，並整理成與字幕相同的 VTT 格式。
+2. `yt-dlp` 將影片下載到 `work_dir/video.mp4`，並依 `config.SUBTITLE_LANGS`（預設 `['zh-TW', 'zh-Hant', 'en', 'ko', 'ja']`，此為優先順序）嘗試抓字幕檔 `work_dir/video.<lang>.vtt`——`writesubtitles` 和 `writeautomaticsub` 都開，同一個語言「有人工上傳字幕就用人工的，沒有才退回 YouTube 自動產生的字幕」，而不是完全跳過沒有人工字幕的語言、直接掉到後面更慢的語音轉錄。
+3. **字幕優先策略**：若上述任一語言的字幕檔存在，就直接使用（`subtitle_used=True`），不進行聲音轉錄。否則透過 `ffmpeg` 擷取聲音，再用 `transcribe_audio()`（依 `config.TRANSCRIPTION_BACKEND` 分派，見下方「語音轉錄後端」）進行本地端轉錄，並整理成與字幕相同的 VTT 格式。**不論字幕來源是人工還是 YouTube 自動產生，讀進來後都會先過 `utils/vtt_cleaner.py:clean_vtt()`**：YouTube 自動字幕是「滾動式」格式（同一句話用逐字累加的內嵌標籤重複顯示好幾次），直接拿給後面的正則表達式解析器，時間戳記行格式對不上、句子也會重複，`clean_vtt()` 會去除重複、拆掉內嵌標籤、依句尾標點把過短的片段合併成完整句子（對已經乾淨的人工字幕是 no-op，不用另外判斷字幕來源）。
 4. 語言處理邏輯集中在 `utils/vtt_translator.py`：
    - `detect_language()` 依 `config.TRANSLATION_BACKEND` 分派：`'apple'` 後端用 `apple_llm_bridge` 的 `NLLanguageRecognizer`（`NaturalLanguage` framework，統計式專用語言辨識器，非生成式 LLM，見下方說明）；`'ollama'` 後端或 apple 呼叫失敗時用 `langdetect`（+ Unicode 書寫系統判斷做前置修正）。兩條路徑都**不呼叫生成式 LLM**。
    - 若來源語言為中文 → `summarize()` 直接摘要，不翻譯。
@@ -58,9 +59,20 @@ python main.py
   - `_generate()` 對這兩種 reason 都有專門處理：**自動 fallback 到 Ollama 重試同一次呼叫**（`_APPLE_RETRYABLE_REASONS`），讓整支影片不會因為單一段落被擋下就整個處理失敗。其他失敗原因（`unavailable`／`process_error`／一般 `generation_failed`）不會 fallback，直接往上拋，因為這些通常代表需要人工處理的真正問題（Apple Intelligence 沒開、binary 沒 build、逾時等）。
   - 批次翻譯（`[編號]` 格式）在句數較多（實測 20 句一批）時，`FoundationModels` 遵守格式的穩定度不如小批次穩定，常觸發 `_parse_numbered_translation` 失敗、回退成逐句呼叫——這會顯著拉長處理時間，是已知的效能限制。
   - **重複迴圈退化**：`_generate()` 對每次生成結果都跑 `_looks_like_repetition_loop()` 檢查（同一行內容去除編號後連續出現 3 次以上視為異常）。實際踩過的案例：翻譯一個很短的原文片段（`to "all are created equal"`）時，模型生成了 50 幾行「我們應該努力消除不平等的機會」的重複內容，跟原文完全無關，格式也不符合 `[n]` 批次格式所以逃過了批次的解析檢查，直接被存進資料庫、顯示在頁面上。偵測到退化時，`_generate()` 一樣走 `_APPLE_RETRYABLE_REASONS` 的 fallback 邏輯換 Ollama 重試；`translate_text()` 在換過後端仍然退化時會優雅降級成保留原文（而不是讓整支影片處理中斷），`translate_batch()` 則把整批退化視同格式解析失敗、回退成逐句翻譯。這個檢查對兩個後端都生效，不是 Apple 專屬（Ollama 的小模型理論上也可能有同樣的失敗模式）。
+  - **`exceededContextWindowSize`（4096 token 上限）**：實測發現這個錯誤不是單純「輸入太長」——同樣長度的輸入，重跑不一定會觸發，猜測是 context window 算的是輸入加輸出的總和，模型偶爾生成異常冗長的回應（跟重複迴圈退化是同一類問題）就會把額度吃光。三層因應：(1) `main.swift` 呼叫 `session.respond(to:options:)` 時帶 `GenerationOptions(maximumResponseTokens: 1024)`，直接限制單次回應長度上限；(2) `summarize()` 用 `_SUMMARY_CHUNK_CHAR_LIMIT`（1800 字元）先把長逐字稿切成多段，超過門檻就先個別摘要重點、再合併段落摘要做最終摘要（map-reduce，遞迴處理合併後還是太長的情況）；(3) `translate_batch()` 的分批邏輯（`_build_translation_batches`）除了原本「最多 20 句」的限制，也加了 `_TRANSLATION_BATCH_CHAR_LIMIT`（1200 字元）——YouTube 自動字幕合併成完整句子後單句可能較長，只看句數不夠。這三個門檻都是實測調出來、不是精確的 token 計算，未來如果又踩到這個錯誤，代表門檻還要再調低。
 - **`'ollama'`**：走 `openai` client 打 Ollama 的 OpenAI 相容端點（`config.OLLAMA_BASE_URL`，預設 `http://localhost:11434/v1/`），模型是 `config.OLLAMA_MODEL_NAME`（預設 `gemma2:9b`，也可用 `utils/vtt_translator.py` 的 `set_model()` 在執行期切換）。保留這條路徑是為了非 Mac 主機部署，或想切換/比較其他地端或雲端模型。
 
 `GenerationError`（`utils/vtt_translator.py`）是兩個後端共用的例外類型，帶 `.reason` 屬性方便呼叫端判斷失敗種類，不用理會底層是哪個後端在報錯。
+
+## 語音轉錄後端（`config.TRANSCRIPTION_BACKEND`）
+
+只有**沒有字幕、需要轉錄**時才會用到，`utils/video_processor.py:transcribe_audio()` 是統一入口：
+
+- **`'apple'`（預設）**：透過 `apple_llm_bridge` 的 `mode: "transcribe"` 呼叫 **macOS 26 新的 `Speech`/`SpeechAnalyzer` + `SpeechTranscriber` API**（跟舊版 `SFSpeechRecognizer` 是不同東西）。純語音辨識、不是生成式模型，沒有 guardrail 疑慮；已實測正確涵蓋這個 app 需要的所有語言（`zh-TW`/`zh-CN`/`en-*`/`ja-JP`/`ko-KR`，`SpeechTranscriber.supportedLocales` 實際支援更多），對乾淨語音（TTS）幾乎完全正確，對真實世界音訊（背景音、口語含糊）也可用、跟 whisper 一樣會有偶發辨識誤差。回傳的是逐句（`isFinal` 結果）加逐字時間戳記，比 whisper 的 segment 級別更細；`AVAudioFile` 直接吃 `extract_audio()` 產生的 16kHz mono mp3，不需要額外轉檔。
+  - `SpeechTranscriber(locale:)` 需要先指定語言，不像 whisper 會自動偵測音訊語言——`utils/video_processor.py:pick_speech_locale()` 借用既有的 `detect_language()`（餵影片標題+簡介）先猜一次語言，猜不到或沒對應到支援清單就退回 `en-US`。
+  - 對應語言的模型資源第一次使用時可能需要透過 `AssetInventory` 下載（實測常見語言通常已經隨系統安裝好）。
+  - `transcribe_audio_with_apple_speech()` 失敗（locale 不支援、Speech 服務未啟用、binary 沒 build 等）時回傳 `None`，`transcribe_audio()` 會自動退回 `'mlx_whisper'` 後端重試——跟翻譯／摘要那邊 Apple 後端失敗會退回 Ollama 是同一種設計精神。
+- **`'mlx_whisper'`**：走 `mlx_whisper.transcribe(...)`（`transcribe_audio_with_whisper()`）。保留這條路徑是為了非 Mac 主機部署，或 apple 後端失敗時的備援；會踩到上面提到的 `numpy`/`numba` 依賴問題。
 
 ## 在此程式庫中作業時的注意事項
 

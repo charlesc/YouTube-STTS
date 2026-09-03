@@ -37,8 +37,14 @@ _LANGUAGE_NAMES = {
     'ja': 'Japanese',
 }
 
-# 批次翻譯時，每個請求最多包含幾句字幕（避免單一 prompt 過長、也避免逐句呼叫模型太慢）
+# 批次翻譯時，每個請求最多包含幾句字幕（避免逐句呼叫模型太慢），以及全部
+# 句子加起來的字元數上限（避免單一 prompt 過長）——兩個條件哪個先到就切下
+#一批。字元數上限是實測踩過的真實案例逼出來的：YouTube 自動字幕經過
+# _merge_into_sentences 合併成完整句子後，單句可能長達 15 秒的內容，
+# 20 句一批的固定數量已經不夠，會讓 prompt 超出 FoundationModels
+# 4096 token 的 context window（exceededContextWindowSize）。
 _TRANSLATION_BATCH_SIZE = 20
+_TRANSLATION_BATCH_CHAR_LIMIT = 1200
 
 # Unicode 分區，用來在統計式語言偵測之前，先用字元本身的書寫系統做判斷。
 # langdetect 對中/韓文的短句（尤其標點符號較多、字數少）常誤判——實測同一批
@@ -317,6 +323,26 @@ def _parse_numbered_translation(content, expected_count):
     return [text.strip() for _, text in ordered]
 
 
+def _build_translation_batches(texts, batch_size, char_limit):
+    """把句子分批，每批最多 batch_size 句、全部句子加起來不超過 char_limit
+    字元——只看句數的話，句子本身很長時（例如自動字幕合併出來的完整句子）
+    單一批次還是可能超出模型的 context window，所以字元數上限跟句數上限
+    哪個先到就先切下一批。"""
+    batches = []
+    current = []
+    current_len = 0
+    for text in texts:
+        if current and (len(current) >= batch_size or current_len + len(text) > char_limit):
+            batches.append(current)
+            current = []
+            current_len = 0
+        current.append(text)
+        current_len += len(text)
+    if current:
+        batches.append(current)
+    return batches
+
+
 def translate_batch(texts, source_language, target_language, batch_size=_TRANSLATION_BATCH_SIZE):
     """將多句字幕分批一次送給模型翻譯，取代逐句各發一次請求。
 
@@ -327,8 +353,7 @@ def translate_batch(texts, source_language, target_language, batch_size=_TRANSLA
         return list(texts)
 
     translated = []
-    for start in range(0, len(texts), batch_size):
-        batch = texts[start:start + batch_size]
+    for batch in _build_translation_batches(texts, batch_size, _TRANSLATION_BATCH_CHAR_LIMIT):
         numbered = "\n".join(f"[{i + 1}] {text}" for i, text in enumerate(batch))
         prompt = (
             f"請將以下用 [編號] 標示的 {source_language} 字幕逐句翻譯為 {target_language}。"
@@ -383,13 +408,42 @@ def process_vtt(vtt_content, source_language):
     return translated_vtt.strip(), all_text.strip()
 
 
-def summarize(translated_text):
-    """為已經是繁體中文的文字產生摘要，回傳的 HTML 已用白名單清洗過。
+# 送進 summarize() 單次呼叫的文字長度上限（字元數，粗略估算，不追求精確
+# token 計算）。實測踩過的真實案例：一支 37 分鐘的影片，完整逐字稿加上
+# 摘要指示的 prompt 一起送給 FoundationModels，總共 4089 token，超過它
+# 4096 token 的 context window 上限，直接失敗（exceededContextWindowSize）。
+# 這是模型結構性的限制，不是靠換 Ollama 後端就能解決的問題——Ollama 預設
+# 的 context window 通常也不大，所以不管哪個後端都需要控制單次送進去的
+# 文字長度，超過門檻時改用分段摘要（map-reduce）：先個別摘要每一段，
+# 再把段落摘要合併成最終摘要。
+_SUMMARY_CHUNK_CHAR_LIMIT = 1800
 
-    只接受「已翻譯完成」的文字：呼叫端（`process_vtt` 的輸出）已經保證內容是
-    繁體中文，這裡不會重新偵測語言或嘗試翻譯，避免重複呼叫模型。
-    """
-    prompt = f"""請根據以下影片轉錄文字稿生成一份簡潔的繁體中文摘要（直接回答，不要做其他說明或評論，並提供HTML格式的內容，例如<ul><li>）。摘要應包含以下內容:
+
+def _split_into_chunks(text, limit=_SUMMARY_CHUNK_CHAR_LIMIT):
+    """把長文字切成不超過 limit 字元的區塊，盡量在句子結尾（。！？）切，
+    避免把一句話從中間硬切開。"""
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    start = 0
+    text_length = len(text)
+    while start < text_length:
+        end = min(start + limit, text_length)
+        if end < text_length:
+            cut = -1
+            for punct in '。！？':
+                pos = text.rfind(punct, start, end)
+                cut = max(cut, pos)
+            if cut > start:
+                end = cut + 1
+        chunks.append(text[start:end])
+        start = end
+    return chunks
+
+
+def _summary_prompt(text):
+    return f"""請根據以下影片轉錄文字稿生成一份簡潔的繁體中文摘要（直接回答，不要做其他說明或評論，並提供HTML格式的內容，例如<ul><li>）。摘要應包含以下內容:
 
             1. 影片的主要主題或目的
             2. 3-5個關鍵要點或主要論點
@@ -397,9 +451,43 @@ def summarize(translated_text):
             4. 總結全文的簡短段落
 
             請基於以下內容生成：：
-            {translated_text}
+            {text}
             """
-    raw_summary = _generate(prompt)
+
+
+def _partial_summary_prompt(text):
+    return (
+        "請用繁體中文，以三到五個重點條列的方式，簡短摘要以下這段影片逐字稿的內容"
+        "（這只是整支影片其中一段，直接條列重點即可，不需要開頭或結尾的完整摘要段落，"
+        "不要做其他任何回覆或說明）：\n"
+        f"{text}"
+    )
+
+
+def summarize(translated_text):
+    """為已經是繁體中文的文字產生摘要，回傳的 HTML 已用白名單清洗過。
+
+    只接受「已翻譯完成」的文字：呼叫端（`process_vtt` 的輸出）已經保證內容是
+    繁體中文，這裡不會重新偵測語言或嘗試翻譯，避免重複呼叫模型。
+
+    文字太長時（見 _SUMMARY_CHUNK_CHAR_LIMIT）先分段各自摘要重點，再把
+    段落摘要合併起來做最終摘要，避免超出模型的 context window。
+    """
+    chunks = _split_into_chunks(translated_text)
+
+    if len(chunks) == 1:
+        source_for_final_summary = chunks[0]
+    else:
+        logger.info(f"轉錄文字過長（{len(translated_text)} 字），分成 {len(chunks)} 段分別摘要後再合併")
+        partial_summaries = [_generate(_partial_summary_prompt(chunk)) for chunk in chunks]
+        source_for_final_summary = '\n'.join(partial_summaries)
+        # 段落摘要合併後如果還是太長（極長的影片、段落數很多），再分一次
+        # 段——遞迴而非無限迴圈：只要 _split_into_chunks 對合併後文字的
+        # 判斷跟這次不同（因為內容縮短了很多），就不會無窮遞迴。
+        if len(source_for_final_summary) > _SUMMARY_CHUNK_CHAR_LIMIT:
+            return summarize(source_for_final_summary)
+
+    raw_summary = _generate(_summary_prompt(source_for_final_summary))
     return bleach.clean(raw_summary, tags=_SUMMARY_ALLOWED_TAGS, attributes={}, strip=True)
 
 

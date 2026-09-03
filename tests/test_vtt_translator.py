@@ -148,6 +148,33 @@ def test_detect_language_falls_back_to_langdetect_when_apple_bridge_fails(monkey
     assert vt.detect_language("這是一段繁體中文測試文字。") == "Traditional Chinese"
 
 
+def test_build_translation_batches_respects_count_limit():
+    texts = [f"句子{i}" for i in range(25)]
+    batches = vt._build_translation_batches(texts, batch_size=20, char_limit=100000)
+    assert [len(b) for b in batches] == [20, 5]
+
+
+def test_build_translation_batches_respects_char_limit():
+    """迴歸測試：YouTube 自動字幕合併成完整句子後，單句可能很長，
+    20 句一批的固定數量已經不夠，會讓 prompt 超出模型的 context window
+    （實測踩過 exceededContextWindowSize）。字元數上限要能在句數上限之前
+    先切下一批。"""
+    long_sentence = "字" * 60  # 5 句就會超過 char_limit=100
+    texts = [long_sentence] * 10
+
+    batches = vt._build_translation_batches(texts, batch_size=20, char_limit=100)
+
+    assert all(len(b) <= 2 for b in batches)  # 每批最多兩句（2*60=120 但第三句會超過 100）
+    assert sum(len(b) for b in batches) == 10
+
+
+def test_build_translation_batches_keeps_oversized_single_item_alone():
+    # 單一句子本身就超過 char_limit 時，不該卡在空批次的迴圈裡出不來。
+    texts = ["A" * 200, "short"]
+    batches = vt._build_translation_batches(texts, batch_size=20, char_limit=100)
+    assert batches == [["A" * 200], ["short"]]
+
+
 def test_translate_batch_numbers_cues_and_preserves_order(monkeypatch):
     _use_ollama_backend(monkeypatch)
 
@@ -464,3 +491,69 @@ def test_translate_batch_falls_back_to_per_cue_when_batch_output_is_degenerate(m
     result = vt.translate_batch(["Hello", "World"], "English", "Traditional Chinese")
     assert result == ["逐句翻譯結果", "逐句翻譯結果"]
     assert call_count["n"] == 3  # 1 次批次嘗試（退化）+ 2 次逐句回退
+
+
+# --- summarize() 分段摘要 ---
+#
+# 真實案例：一支 37 分鐘影片的完整逐字稿，加上摘要 prompt 一起送給
+# FoundationModels，總共 4089 token，超過它 4096 token 的 context window，
+# 直接失敗（exceededContextWindowSize）。改用分段摘要（map-reduce）解決。
+
+def test_split_into_chunks_keeps_short_text_as_single_chunk():
+    short_text = "這是一段很短的文字。"
+    assert vt._split_into_chunks(short_text) == [short_text]
+
+
+def test_split_into_chunks_splits_long_text_on_sentence_boundaries():
+    sentence = "這是一句大約十個字的句子。"
+    long_text = sentence * 300  # 遠超過 _SUMMARY_CHUNK_CHAR_LIMIT
+
+    chunks = vt._split_into_chunks(long_text)
+
+    assert len(chunks) > 1
+    assert all(len(c) <= vt._SUMMARY_CHUNK_CHAR_LIMIT for c in chunks)
+    # 每個區塊都應該在句尾標點結束，不應該把句子從中間切開
+    assert all(c.endswith('。') for c in chunks)
+    assert ''.join(chunks) == long_text
+
+
+def test_summarize_uses_single_call_for_short_text(monkeypatch):
+    calls = []
+
+    def fake_generate(prompt):
+        calls.append(prompt)
+        return "<ul><li>摘要</li></ul>"
+
+    monkeypatch.setattr(vt, "_generate", fake_generate)
+
+    result = vt.summarize("一段不長的逐字稿內容。")
+
+    assert len(calls) == 1
+    assert "摘要" in result
+
+
+def test_summarize_uses_map_reduce_for_long_text(monkeypatch):
+    """迴歸測試：逐字稿超過長度門檻時，應該先分段各自摘要重點，
+    再把段落摘要合併起來做最終摘要，而不是把整段長文字一次送進模型。"""
+    sentence = "這是一句大約十個字的句子。"
+    long_text = sentence * 300
+
+    calls = []
+
+    def fake_generate(prompt):
+        calls.append(prompt)
+        if "請用繁體中文，以三到五個重點條列" in prompt:
+            return "- 段落重點"
+        return "<ul><li>最終摘要</li></ul>"
+
+    monkeypatch.setattr(vt, "_generate", fake_generate)
+
+    result = vt.summarize(long_text)
+
+    expected_chunk_count = len(vt._split_into_chunks(long_text))
+    assert expected_chunk_count > 1
+    # 每段各呼叫一次做段落摘要，加上最後合併的那一次
+    assert len(calls) == expected_chunk_count + 1
+    # 送進模型的每個 prompt 都不該包含完整的原始長文字
+    assert all(len(p) < len(long_text) for p in calls)
+    assert "最終摘要" in result
