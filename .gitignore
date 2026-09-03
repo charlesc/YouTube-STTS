@@ -3,9 +3,17 @@
 
 # Databases
 *.db
+*.db-wal
+*.db-shm
 
 static/screenshots/*
 !static/screenshots/.gitkeep
+
+# Swift Package Manager build artifacts (apple_llm_bridge/)
+.build/
+
+# macOS
+.DS_Store
 
 
 # Byte-compiled / optimized / DLL files

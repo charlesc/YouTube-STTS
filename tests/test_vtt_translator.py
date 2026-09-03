@@ -1,0 +1,466 @@
+import json
+import types
+
+import utils.vtt_translator as vt
+
+
+def _use_ollama_backend(monkeypatch):
+    """這些測試針對的是走 Ollama（openai client）的呼叫邏輯，明確切到這個
+    後端再 mock `vt.client.chat.completions.create`——config.TRANSLATION_BACKEND
+    預設是 'apple'，不切換的話這些 mock 根本不會被呼叫到。"""
+    monkeypatch.setattr(vt.config, "TRANSLATION_BACKEND", "ollama")
+
+
+def test_extract_text_from_vtt_strips_headers_and_timestamps():
+    vtt = (
+        "WEBVTT\n\n"
+        "00:00:00.000 --> 00:00:02.000\nHello\n\n"
+        "00:00:02.000 --> 00:00:04.000\nWorld\n\n"
+    )
+    assert vt.extract_text_from_vtt(vtt) == "Hello World"
+
+
+def test_process_vtt_chinese_source_skips_translation_call(monkeypatch):
+    """中文來源不應該呼叫翻譯 API，直接沿用原文。"""
+    _use_ollama_backend(monkeypatch)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("中文來源不應該呼叫翻譯 API")
+
+    monkeypatch.setattr(vt.client.chat.completions, "create", fail_if_called)
+
+    vtt = "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n你好世界\n\n"
+    translated_vtt, all_text = vt.process_vtt(vtt, "Traditional Chinese")
+
+    assert translated_vtt == vtt.strip()
+    assert "你好世界" in all_text
+
+
+def test_process_vtt_non_chinese_source_translates_each_cue(monkeypatch):
+    _use_ollama_backend(monkeypatch)
+
+    class FakeChoice:
+        def __init__(self, content):
+            self.message = types.SimpleNamespace(content=content)
+
+    class FakeResponse:
+        def __init__(self, content):
+            self.choices = [FakeChoice(content)]
+
+    def fake_create(model, messages):
+        assert "Hello" in messages[0]["content"]
+        return FakeResponse("翻譯結果")
+
+    monkeypatch.setattr(vt.client.chat.completions, "create", fake_create)
+
+    vtt = "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nHello\n\n"
+    translated_vtt, all_text = vt.process_vtt(vtt, "English")
+
+    assert "翻譯結果" in translated_vtt
+    assert "00:00:00.000 --> 00:00:02.000" in translated_vtt
+    assert all_text == "翻譯結果"
+
+
+def test_translate_text_short_circuits_when_languages_match(monkeypatch):
+    _use_ollama_backend(monkeypatch)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("來源與目標語言相同時不應呼叫翻譯 API")
+
+    monkeypatch.setattr(vt.client.chat.completions, "create", fail_if_called)
+
+    assert vt.translate_text("hello", "English", "English") == "hello"
+
+
+def test_detect_language_via_langdetect_uses_langdetect_not_llm_free_text(monkeypatch):
+    """迴歸測試：detect_language 過去讓 LLM 自由回覆語言名稱，再用
+    `"chinese" in response` 子字串比對，只要回覆含有 "not Chinese" 之類的
+    句子就會誤判。現在改用 langdetect，且完全不應呼叫模型。"""
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("detect_language 不應該再呼叫 LLM")
+
+    monkeypatch.setattr(vt.client.chat.completions, "create", fail_if_called)
+
+    assert vt._detect_language_via_langdetect("這是一段繁體中文測試文字，用來確認語言偵測功能是否正常運作。") == "Traditional Chinese"
+    assert vt._detect_language_via_langdetect("This is an English sentence used to verify language detection.") == "English"
+
+
+def test_detect_language_via_langdetect_short_chinese_sentences_are_not_misread_as_korean(monkeypatch):
+    """迴歸測試：langdetect 對中文短句（標點多、字數少）在實測中經常誤判為
+    韓文；Unicode 書寫系統判斷應該先攔下這類含中日共用表意文字、
+    但不含諺文/假名的文字，直接判為中文。"""
+    monkeypatch.setattr(vt.client.chat.completions, "create",
+                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("不應呼叫 LLM")))
+
+    short_chinese_sentences = [
+        "這是一段繁體中文測試文字，用來確認語言偵測功能是否正常運作。",
+        "歡迎收看今天的影片，我們將會介紹如何使用這個工具。",
+        "謝謝大家的收看，我們下次影片見。",
+        "這個功能非常實用，可以幫助你節省很多時間。",
+    ]
+    for sentence in short_chinese_sentences:
+        assert vt._detect_language_via_langdetect(sentence) == "Traditional Chinese"
+
+
+def test_detect_language_via_langdetect_recognizes_korean_and_japanese():
+    assert vt._detect_language_via_langdetect("안녕하세요 이것은 한국어 테스트 문장입니다") == "Korean"
+    assert vt._detect_language_via_langdetect("こんにちは、これは日本語のテスト文です") == "Japanese"
+
+
+def test_detect_language_handles_empty_or_undetectable_text():
+    # 空字串在 detect_language() 一開始就短路回傳，不會呼叫任何後端。
+    assert vt.detect_language("") == "Unknown"
+    assert vt.detect_language("   ") == "Unknown"
+
+
+def test_detect_language_uses_apple_backend_by_default(monkeypatch):
+    """config.TRANSLATION_BACKEND 預設是 'apple'，detect_language() 應該呼叫
+    apple_llm_bridge 的 detect_language 模式（NLLanguageRecognizer），
+    而不是 langdetect。"""
+    assert vt.config.TRANSLATION_BACKEND == "apple"
+
+    captured = {}
+
+    def fake_run(args, input, capture_output, text, encoding, timeout):
+        captured['input'] = json.loads(input)
+        return _FakeCompletedProcess(stdout=json.dumps({"status": "ok", "language": "Traditional Chinese"}))
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("apple 後端可用時不應該退回 langdetect")
+
+    monkeypatch.setattr(vt.subprocess, "run", fake_run)
+    monkeypatch.setattr(vt, "_detect_language_via_langdetect", fail_if_called)
+
+    assert vt.detect_language("你好世界") == "Traditional Chinese"
+    assert captured['input'] == {"mode": "detect_language", "text": "你好世界"}
+
+
+def test_detect_language_falls_back_to_langdetect_when_apple_bridge_fails(monkeypatch):
+    """apple_llm_bridge 呼叫失敗（binary 沒 build、逾時等）時，語言偵測不是
+    使用者真正要的產出，不該讓整支影片處理中斷——應該退回 langdetect。"""
+    assert vt.config.TRANSLATION_BACKEND == "apple"
+
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(vt.subprocess, "run", fake_run)
+
+    assert vt.detect_language("這是一段繁體中文測試文字。") == "Traditional Chinese"
+
+
+def test_translate_batch_numbers_cues_and_preserves_order(monkeypatch):
+    _use_ollama_backend(monkeypatch)
+
+    class FakeChoice:
+        def __init__(self, content):
+            self.message = types.SimpleNamespace(content=content)
+
+    class FakeResponse:
+        def __init__(self, content):
+            self.choices = [FakeChoice(content)]
+
+    def fake_create(model, messages):
+        # 模擬模型依照 [編號] 格式逐句回覆翻譯結果
+        return FakeResponse("[1] 你好\n[2] 世界")
+
+    monkeypatch.setattr(vt.client.chat.completions, "create", fake_create)
+
+    result = vt.translate_batch(["Hello", "World"], "English", "Traditional Chinese")
+    assert result == ["你好", "世界"]
+
+
+def test_translate_batch_falls_back_to_per_cue_when_response_unparseable(monkeypatch):
+    _use_ollama_backend(monkeypatch)
+
+    class FakeChoice:
+        def __init__(self, content):
+            self.message = types.SimpleNamespace(content=content)
+
+    class FakeResponse:
+        def __init__(self, content):
+            self.choices = [FakeChoice(content)]
+
+    call_count = {"n": 0}
+
+    def fake_create(model, messages):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # 第一次（批次）呼叫回傳格式不對（缺編號），應觸發回退邏輯
+            return FakeResponse("這不是預期的格式")
+        return FakeResponse("逐句翻譯結果")
+
+    monkeypatch.setattr(vt.client.chat.completions, "create", fake_create)
+
+    result = vt.translate_batch(["Hello", "World"], "English", "Traditional Chinese")
+    assert result == ["逐句翻譯結果", "逐句翻譯結果"]
+    assert call_count["n"] == 3  # 1 次批次嘗試 + 2 次逐句回退
+
+
+class _FakeCompletedProcess:
+    def __init__(self, stdout, returncode=0, stderr=""):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def test_generate_dispatches_to_apple_backend_by_default(monkeypatch):
+    """config.TRANSLATION_BACKEND 預設是 'apple'，_generate() 應該呼叫
+    apple_llm_bridge，而不是 Ollama 的 openai client。"""
+    assert vt.config.TRANSLATION_BACKEND == "apple"
+
+    captured = {}
+
+    def fake_run(args, input, capture_output, text, encoding, timeout):
+        captured['args'] = args
+        captured['input'] = input
+        return _FakeCompletedProcess(stdout=json.dumps({"status": "ok", "content": "地端翻譯結果"}))
+
+    monkeypatch.setattr(vt.subprocess, "run", fake_run)
+
+    result = vt._generate("翻譯這句話")
+
+    assert result == "地端翻譯結果"
+    assert captured['args'] == [vt.config.APPLE_LLM_BRIDGE_PATH]
+    assert json.loads(captured['input']) == {"mode": "generate", "prompt": "翻譯這句話"}
+
+
+def test_generate_via_apple_raises_when_bridge_reports_error(monkeypatch):
+    monkeypatch.setattr(
+        vt.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(
+            stdout=json.dumps({"status": "error", "reason": "unavailable", "error": "Apple Intelligence 未啟用"})
+        )
+    )
+
+    try:
+        vt._generate_via_apple("摘要這段文字")
+        assert False, "應該要拋出 GenerationError"
+    except vt.GenerationError as e:
+        assert "Apple Intelligence 未啟用" in str(e)
+
+
+def test_generate_via_apple_raises_when_binary_missing(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(vt.subprocess, "run", fake_run)
+
+    try:
+        vt._generate_via_apple("翻譯這句話")
+        assert False, "應該要拋出 GenerationError"
+    except vt.GenerationError as e:
+        assert "swift build" in str(e)
+
+
+def test_generate_falls_back_to_ollama_on_guardrail_violation(monkeypatch):
+    """迴歸測試：Apple Intelligence 的內容安全防護（無法關閉）擋下請求時，
+    _generate() 應該自動改用 Ollama 重試這一次呼叫，而不是讓整支影片處理失敗。"""
+    assert vt.config.TRANSLATION_BACKEND == "apple"
+
+    def fake_run(*args, **kwargs):
+        return _FakeCompletedProcess(stdout=json.dumps({
+            "status": "error",
+            "reason": "guardrail_violation",
+            "error": "Response may contain sensitive or unsafe content",
+        }))
+
+    class FakeChoice:
+        def __init__(self, content):
+            self.message = types.SimpleNamespace(content=content)
+
+    class FakeResponse:
+        def __init__(self, content):
+            self.choices = [FakeChoice(content)]
+
+    monkeypatch.setattr(vt.subprocess, "run", fake_run)
+    monkeypatch.setattr(vt.client.chat.completions, "create",
+                         lambda model, messages: FakeResponse("Ollama 救援翻譯結果"))
+
+    assert vt._generate("翻譯這段敏感內容") == "Ollama 救援翻譯結果"
+
+
+def test_generate_falls_back_to_ollama_on_soft_refusal(monkeypatch):
+    """迴歸測試：即使用了較寬鬆的 guardrails，FoundationModels 有時仍會用
+    「客氣拒絕」的自然語言文字回應取代真正的翻譯結果，而不拋出例外
+    （main.swift 的 looksLikeRefusal 會攔下並回報 reason='refusal_detected'）。
+    這種情況也應該跟 guardrail_violation 一樣自動改用 Ollama 重試。"""
+    assert vt.config.TRANSLATION_BACKEND == "apple"
+
+    def fake_run(*args, **kwargs):
+        return _FakeCompletedProcess(stdout=json.dumps({
+            "status": "error",
+            "reason": "refusal_detected",
+            "error": "模型以自然語言婉拒回應",
+        }))
+
+    class FakeChoice:
+        def __init__(self, content):
+            self.message = types.SimpleNamespace(content=content)
+
+    class FakeResponse:
+        def __init__(self, content):
+            self.choices = [FakeChoice(content)]
+
+    monkeypatch.setattr(vt.subprocess, "run", fake_run)
+    monkeypatch.setattr(vt.client.chat.completions, "create",
+                         lambda model, messages: FakeResponse("Ollama 救援翻譯結果"))
+
+    assert vt._generate("翻譯這段敏感內容") == "Ollama 救援翻譯結果"
+
+
+def test_generate_does_not_fall_back_on_other_apple_errors(monkeypatch):
+    """非 guardrail 的失敗（逾時、binary 不存在等）是真正需要處理的問題，
+    不應該被靜默吞掉、改走 Ollama——應該直接往上拋讓呼叫端知道。"""
+    assert vt.config.TRANSLATION_BACKEND == "apple"
+
+    def fake_run(*args, **kwargs):
+        return _FakeCompletedProcess(stdout=json.dumps({
+            "status": "error",
+            "reason": "unavailable",
+            "error": "Apple Intelligence 未啟用",
+        }))
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("非 guardrail 錯誤不應該 fallback 到 Ollama")
+
+    monkeypatch.setattr(vt.subprocess, "run", fake_run)
+    monkeypatch.setattr(vt.client.chat.completions, "create", fail_if_called)
+
+    try:
+        vt._generate("翻譯這句話")
+        assert False, "應該要拋出 GenerationError"
+    except vt.GenerationError as e:
+        assert e.reason == "unavailable"
+
+
+def test_generate_via_apple_raises_on_timeout(monkeypatch):
+    import subprocess as real_subprocess
+
+    def fake_run(*args, **kwargs):
+        raise real_subprocess.TimeoutExpired(cmd="apple-llm-bridge", timeout=kwargs.get("timeout", 120))
+
+    monkeypatch.setattr(vt.subprocess, "run", fake_run)
+
+    try:
+        vt._generate_via_apple("翻譯這句話")
+        assert False, "應該要拋出 GenerationError"
+    except vt.GenerationError as e:
+        assert "逾時" in str(e)
+
+
+# --- 重複迴圈退化偵測 ---
+#
+# 真實案例：翻譯原文片段 `to "all are created equal"`（很短、像斷句）時，
+# FoundationModels 生成了「1. ... 2. ... 3. 我們應該努力消除不平等的機會。
+# 4. 我們應該努力消除不平等的機會。...」一路重複到 50 幾行，內容跟原文完全
+# 無關，直接被存進資料庫、顯示在影片詳情頁上（使用者截圖回報「這個段落有點
+# 奇怪」）。格式不符合 _parse_numbered_translation 要求的 `[n]` 樣式，所以
+# 批次翻譯的格式檢查攔不住；問題出在 translate_text()（逐句翻譯／批次解析
+# 失敗後的回退路徑）完全沒有驗證模型輸出品質。
+
+_REAL_DEGENERATE_OUTPUT = (
+    "1.  所有人都平等地誕生。\n"
+    "2.  在這個世界上，每個人都有權利享有平等的機會。\n"
+    "3.  平等的機會不是給予的，而是獲得的。\n"
+    "4.  我們應該對平等的機會和機會的不平等感到憤怒。\n"
+    "5.  我們應該努力消除不平等的機會。\n"
+    + "\n".join(f"{i}. 我們應該努力消除不平等的機會。" for i in range(6, 51))
+)
+
+
+def test_looks_like_repetition_loop_detects_real_degenerate_output():
+    assert vt._looks_like_repetition_loop(_REAL_DEGENERATE_OUTPUT) is True
+
+
+def test_looks_like_repetition_loop_ignores_normal_translation():
+    normal = (
+        "歡迎回到這個頻道。\n"
+        "今天我們要討論大型語言模型實際上是如何運作的。\n"
+        "我們會介紹 transformer 架構跟注意力機制。\n"
+        "感謝收看，下次再見。"
+    )
+    assert vt._looks_like_repetition_loop(normal) is False
+
+
+def test_looks_like_repetition_loop_ignores_short_repeated_boilerplate():
+    # 短行（例如摘要裡重複的小標題字樣）不該被當成退化，避免誤判。
+    short_repeats = "\n".join(["小結", "小結", "小結", "小結"])
+    assert vt._looks_like_repetition_loop(short_repeats) is False
+
+
+def test_generate_falls_back_to_ollama_when_apple_output_is_degenerate(monkeypatch):
+    """apple 後端沒有拋例外（回應狀態是 'ok'），但內容本身是重複迴圈退化——
+    _generate() 應該偵測出來、視為跟 guardrail 一樣的情況，改用 Ollama 重試。"""
+    assert vt.config.TRANSLATION_BACKEND == "apple"
+
+    def fake_run(*args, **kwargs):
+        return _FakeCompletedProcess(stdout=json.dumps({"status": "ok", "content": _REAL_DEGENERATE_OUTPUT}))
+
+    class FakeChoice:
+        def __init__(self, content):
+            self.message = types.SimpleNamespace(content=content)
+
+    class FakeResponse:
+        def __init__(self, content):
+            self.choices = [FakeChoice(content)]
+
+    monkeypatch.setattr(vt.subprocess, "run", fake_run)
+    monkeypatch.setattr(vt.client.chat.completions, "create",
+                         lambda model, messages: FakeResponse("to \"all are created equal\" 的正常翻譯"))
+
+    assert vt._generate("翻譯這段話") == 'to "all are created equal" 的正常翻譯'
+
+
+def test_generate_raises_when_both_backends_produce_degenerate_output(monkeypatch):
+    assert vt.config.TRANSLATION_BACKEND == "apple"
+
+    def fake_run(*args, **kwargs):
+        return _FakeCompletedProcess(stdout=json.dumps({"status": "ok", "content": _REAL_DEGENERATE_OUTPUT}))
+
+    class FakeChoice:
+        def __init__(self, content):
+            self.message = types.SimpleNamespace(content=content)
+
+    class FakeResponse:
+        def __init__(self, content):
+            self.choices = [FakeChoice(content)]
+
+    monkeypatch.setattr(vt.subprocess, "run", fake_run)
+    monkeypatch.setattr(vt.client.chat.completions, "create",
+                         lambda model, messages: FakeResponse(_REAL_DEGENERATE_OUTPUT))
+
+    try:
+        vt._generate("翻譯這段話")
+        assert False, "兩個後端都退化時應該要拋出 GenerationError"
+    except vt.GenerationError as e:
+        assert e.reason == "degenerate_output"
+
+
+def test_translate_text_gracefully_degrades_to_original_on_degenerate_output(monkeypatch):
+    """迴歸測試：換過後端還是退化時，translate_text() 不該讓整支影片處理
+    崩潰，也不該把重複的垃圾內容存進資料庫——保留原文是相對安全的選擇。"""
+    def fake_generate(prompt):
+        raise vt.GenerationError("疑似退化", reason='degenerate_output')
+
+    monkeypatch.setattr(vt, "_generate", fake_generate)
+
+    result = vt.translate_text('to "all are created equal"', "English", "Traditional Chinese")
+    assert result == 'to "all are created equal"'
+
+
+def test_translate_batch_falls_back_to_per_cue_when_batch_output_is_degenerate(monkeypatch):
+    """批次翻譯整批的生成結果退化時，應該跟「格式解析失敗」一樣回退成
+    逐句翻譯，而不是把退化內容原樣塞進結果或讓整支影片處理中斷。"""
+    call_count = {"n": 0}
+
+    def fake_generate(prompt):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise vt.GenerationError("疑似退化", reason='degenerate_output')
+        return "逐句翻譯結果"
+
+    monkeypatch.setattr(vt, "_generate", fake_generate)
+
+    result = vt.translate_batch(["Hello", "World"], "English", "Traditional Chinese")
+    assert result == ["逐句翻譯結果", "逐句翻譯結果"]
+    assert call_count["n"] == 3  # 1 次批次嘗試（退化）+ 2 次逐句回退

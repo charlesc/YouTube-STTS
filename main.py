@@ -1,18 +1,22 @@
 import os
 import logging
+import threading
+import uuid
 from flask import Flask, render_template, request, jsonify
 from utils.video_processor import process_video # 確保導入所需函數
-import sqlite3
 from database import init_db, get_all_videos, add_video, update_video, dump_database, search_videos, delete_video
 from datetime import datetime,  timedelta
 import re
 
-app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'static/screenshots'
-DATABASE_NAME = 'videos.db'  # 添加此行定义数据库名称
+import config
 
+# 整個應用程式唯一的 logging 進入點設定，其餘模組只呼叫 getLogger(__name__)，
+# 避免重複呼叫 basicConfig 導致設定互相覆蓋或重複輸出。
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = config.UPLOAD_FOLDER
 
 # 確保截圖資料夾存在
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -21,17 +25,52 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 init_db()
 
 
-@app.route('/clear_temp_files', methods=['POST'])
-def clear_temp_files():
-    # 删除临时视频文件
-    if os.path.exists('temp_video.mp4'):
-        os.remove('temp_video.mp4')
-    if os.path.exists('temp_audio.mp3'):
-        os.remove('temp_audio.mp3')
-    return jsonify({
-        'status': 'success',
-        'message': 'Temporary files cleared.'
-    }), 200
+# 影片處理是長時間、同步阻塞的流程（下載、可能的轉錄、逐句/批次翻譯、截圖擷取），
+# 若直接在 request handler 內執行，會讓整個請求掛著等到全部完成才回應，且無法讓
+# 使用者看到進度、也擋住同一個 worker 處理其他請求。這裡改用背景執行緒 + 記憶體內
+# 的工作狀態表，/process_video 啟動工作後立即回應 job_id，前端再輪詢 /job_status/<id>。
+#
+# 這是進程內的簡易佇列，跟著 Flask process 的生命週期走：重啟後工作紀錄會消失，
+# 也不支援多台機器/多個 worker process 共享狀態。若未來需要多 worker 部署，
+# 應改用 Redis/RQ、Celery 等跨進程的工作佇列。
+_jobs_lock = threading.Lock()
+_jobs = {}
+
+
+def _run_video_processing(job_id, youtube_url, capture_interval):
+    try:
+        video_info = process_video(youtube_url, app.config['UPLOAD_FOLDER'], capture_interval)
+
+        if 'error' in video_info:
+            logger.error(f"Error processing video (job {job_id}): {video_info['error']}")
+            with _jobs_lock:
+                _jobs[job_id] = {
+                    'status': 'error',
+                    'error': '影片處理失敗，請確認 URL 是否正確或稍後再試。'
+                }
+            return
+
+        video_info['subtitle_used'] = bool(video_info.get('subtitle_used', False))
+        logger.info(f"Subtitle used (job {job_id}): {video_info['subtitle_used']}")
+        logger.info(f"Translation (job {job_id}, 前100字符): {video_info.get('translation', 'Not found')[:100]}...")
+        logger.info(f"Summary (job {job_id}, 前100字符): {video_info.get('summary', 'Not found')[:100]}...")
+
+        existing_video = get_all_videos(youtube_id=video_info['youtube_id'])
+        if existing_video:
+            update_video(video_info)
+        else:
+            add_video(video_info)
+
+        with _jobs_lock:
+            _jobs[job_id] = {'status': 'done', 'video_info': video_info}
+
+    except Exception as e:
+        logger.error(f"Unexpected error processing video (job {job_id}): {e}", exc_info=True)
+        with _jobs_lock:
+            _jobs[job_id] = {
+                'status': 'error',
+                'error': '影片處理失敗，請確認 URL 是否正確或稍後再試。'
+            }
 
 
 @app.route('/')
@@ -64,55 +103,28 @@ def process_video_route():
     capture_interval = int(request.form.get('capture_interval', 10))
     if not youtube_url:
         return jsonify({'error': 'No YouTube URL provided'}), 400
-    try:
-        video_info = process_video(youtube_url, app.config['UPLOAD_FOLDER'], capture_interval)
-        
-        # Check if subtitles were used
-        subtitle_used = 'subtitle_used' in video_info and video_info['subtitle_used']
 
-        app.logger.info(f"Subtitle used: {video_info.get('subtitle_used', False)}")
-        
-        if subtitle_used:
-            # If subtitles were used
-            video_info['subtitle_used'] = True
-            logging.info("使用字幕檔案進行翻譯與摘要")
-            existing_video = get_all_videos(youtube_id=video_info['youtube_id'])
-            
-            app.logger.info(f"Translation: {video_info.get('translation', 'Not found')[:100]}...")
-            app.logger.info(f"Summary: {video_info.get('summary', 'Not found')[:100]}...")
-           
-            if existing_video:
-                update_video(video_info)
-            else:
-                add_video(video_info)
-            return jsonify({
-                'status': 'success',
-                'message': 'Video processed with subtitles.',
-                'video_info': video_info
-            }), 200
-        else:
-            # If subtitles were not used
-            video_info['subtitle_used'] = False
-            logging.info("使用聲音檔案進行轉錄/翻譯與摘要")
-            existing_video = get_all_videos(youtube_id=video_info['youtube_id'])
+    job_id = uuid.uuid4().hex
+    with _jobs_lock:
+        _jobs[job_id] = {'status': 'processing'}
 
-            app.logger.info(f"Translation: {video_info.get('translation', 'Not found')[:100]}...")
-            app.logger.info(f"Summary: {video_info.get('summary', 'Not found')[:100]}...")
+    thread = threading.Thread(
+        target=_run_video_processing,
+        args=(job_id, youtube_url, capture_interval),
+        daemon=True,
+    )
+    thread.start()
 
-            if existing_video:
-                update_video(video_info)
-            else:
-                add_video(video_info)
-            return jsonify({
-                'status': 'success',
-                'message': 'Video processed without YouTube subtitles.',
-                'video_info': video_info
-            }), 200
+    return jsonify({'status': 'processing', 'job_id': job_id}), 202
 
-    except Exception as e:
-        app.logger.error(f"Error processing video: {str(e)}")
-        return jsonify({'status': 'error', 'error': str(e)}), 500
-    
+
+@app.route('/job_status/<job_id>')
+def job_status(job_id):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        return jsonify({'status': 'error', 'error': '找不到這個處理工作，請重新提交。'}), 404
+    return jsonify(job), 200
 
 
 
@@ -231,4 +243,6 @@ app.jinja_env.filters['format_timestamp'] = format_timestamp
 
 if __name__ == '__main__':
     init_db()  # 初始化數據庫
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    # debug 模式預設關閉（Werkzeug debugger 在 debug=True 時可執行任意程式碼，
+    # 不應在對外環境開啟）；需要時設定環境變數 FLASK_DEBUG=true。
+    app.run(host=config.FLASK_HOST, port=config.FLASK_PORT, debug=config.FLASK_DEBUG, threaded=True)

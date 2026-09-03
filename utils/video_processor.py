@@ -1,33 +1,31 @@
 import os
-from openai import OpenAI
+import shutil
+import tempfile
 import yt_dlp
 import cv2
 import subprocess
 from datetime import datetime
 from utils.image_processor import remove_duplicate_images
-from utils.vtt_translator import translate_and_summarize, process_vtt, extract_text_from_vtt, detect_language
-from database import get_all_videos 
-import mlx_whisper
+from utils.vtt_translator import summarize, process_vtt, extract_text_from_vtt, detect_language
+from database import get_all_videos
+import config
 import logging
 
-
-# 設置日誌記錄
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def cleanup_temp_files():
-    temp_files = ['temp_video.mp4', 'temp_audio.mp3'] + [f"temp_video.{lang}.vtt" for lang in ['zh-TW','zh-Hant', 'en', 'ko', 'ja']]
-    for file in temp_files:
-        if os.path.exists(file):
-            os.remove(file)
-            logger.info(f"Removed temporary file: {file}")
+
+def cleanup_temp_files(work_dir):
+    """移除整個請求專屬的暫存工作目錄。"""
+    if work_dir and os.path.exists(work_dir):
+        shutil.rmtree(work_dir, ignore_errors=True)
+        logger.info(f"Removed temporary working directory: {work_dir}")
 
 
 def extract_audio(input_video_path, output_audio_path):
+    """從視頻中提取音頻並保存為 MP3 文件。"""
     # 如果文件已存在，可以选择先删除或者重命名
     if os.path.exists(output_audio_path):
         os.remove(output_audio_path)
-    """從視頻中提取音頻並保存為 MP3 文件。"""
     command = [
         'ffmpeg',
         '-i',
@@ -61,6 +59,9 @@ def format_timestamp(seconds):
 def transcribe_audio_with_whisper(audio_path, language=None):
     """使用 mlx-whisper 進行音頻轉錄，並返回 VTT 格式的字符串。"""
     try:
+        import mlx_whisper  # 延遲載入：僅限 Apple Silicon，且屬於重量級依賴，
+                             # 只有在沒有字幕、真的需要轉錄時才載入。
+
         if not os.path.exists(audio_path):
             raise ValueError(f"音頻文件 '{audio_path}' 不存在。")
 
@@ -70,11 +71,8 @@ def transcribe_audio_with_whisper(audio_path, language=None):
         if file_size == 0:
             raise ValueError(f"音頻文件 '{audio_path}' 為空。")
 
-        # 初始化 mlx-whisper 模型
-        # model = WhisperModel('small')  # 可以選擇 'tiny', 'base', 'small', 'medium', 'large'
-
-        # 使用 mlx-whisper 模型x``進行轉錄
-        result = mlx_whisper.transcribe(audio_path, path_or_hf_repo="mlx-community/whisper-large-v3-mlx")
+        # 使用 mlx-whisper 模型進行轉錄
+        result = mlx_whisper.transcribe(audio_path, path_or_hf_repo=config.WHISPER_MODEL_REPO)
 
         # 將結果轉換為 VTT 格式的字符串
         transcription = "WEBVTT\n\n"
@@ -95,11 +93,16 @@ def transcribe_audio_with_whisper(audio_path, language=None):
 
 
 def process_video(youtube_url, output_folder, capture_interval=10):
+    # 每次請求都用獨立的暫存工作目錄，避免多支影片同時處理時互相覆寫
+    # temp_video.mp4 / temp_audio.mp3 / 字幕檔等固定檔名。
+    work_dir = tempfile.mkdtemp(prefix='ytstts_')
+    video_path = os.path.join(work_dir, 'video.mp4')
+
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': 'temp_video.%(ext)s',
+        'outtmpl': os.path.join(work_dir, 'video.%(ext)s'),
         'writesubtitles': True,
-        'subtitleslangs': ['zh-TW','zh-Hant', 'en', 'ko', 'ja'],
+        'subtitleslangs': config.SUBTITLE_LANGS,
     }
 
     try:
@@ -115,14 +118,14 @@ def process_video(youtube_url, output_folder, capture_interval=10):
 
         logger.info(f"視頻下載完成: {video_title}")
 
-        if not os.path.exists('temp_video.mp4'):
+        if not os.path.exists(video_path):
             raise FileNotFoundError("視頻文件未成功下載")
 
         subtitle_path = None
         subtitle_used = False
 
-        for lang in ['zh-TW','zh-Hant', 'en', 'ko', 'ja']:
-            potential_subtitle_path = f"temp_video.{lang}.vtt"
+        for lang in config.SUBTITLE_LANGS:
+            potential_subtitle_path = os.path.join(work_dir, f"video.{lang}.vtt")
             if os.path.exists(potential_subtitle_path):
                 subtitle_path = potential_subtitle_path
                 subtitle_used = True
@@ -133,20 +136,18 @@ def process_video(youtube_url, output_folder, capture_interval=10):
             logger.info(f"開始處理字幕檔案: {subtitle_path}")
             with open(subtitle_path, 'r', encoding='utf-8') as file:
                 subtitle_content = file.read()
-            
+
             detected_language = detect_language(extract_text_from_vtt(subtitle_content))
-            translated_vtt, translated_text = process_vtt(subtitle_content, detected_language)
-            _, summary = translate_and_summarize(translated_text)
-        
+            translation, translated_text = process_vtt(subtitle_content, detected_language)
+            summary = summarize(translated_text)
+
             transcription = subtitle_content
-            translation = translated_vtt
 
         else:
             subtitle_used = False
             logger.info("沒有找到合適的字幕檔案，將進行音頻提取和轉錄")
-            input_video_path = 'temp_video.mp4'
-            output_audio_path = 'temp_audio.mp3'
-            audio_path = extract_audio(input_video_path, output_audio_path)
+            output_audio_path = os.path.join(work_dir, 'audio.mp3')
+            audio_path = extract_audio(video_path, output_audio_path)
 
             if audio_path and os.path.exists(audio_path):
                 logger.info(f"開始處理音頻: {audio_path}")
@@ -154,21 +155,21 @@ def process_video(youtube_url, output_folder, capture_interval=10):
                 if transcription:
                     detected_language = detect_language(extract_text_from_vtt(transcription))
                     logger.info(f"檢測到的語言: {detected_language}")
-                    
-                    translated_vtt, translated_text = process_vtt(transcription, detected_language)
-                    logger.info(f"翻譯後的VTT文本 (前100字符): {translated_vtt[:100]}...")
+
+                    translation, translated_text = process_vtt(transcription, detected_language)
+                    logger.info(f"翻譯後的VTT文本 (前100字符): {translation[:100]}...")
                     logger.info(f"翻譯後的文本 (前100字符): {translated_text[:100]}...")
-                    
-                    _, summary = translate_and_summarize(translated_text)
-                    translation = translated_vtt
-                    
+
+                    summary = summarize(translated_text)
+
                     logger.info(f"翻譯後的摘要 (前100字符): {summary[:100]}...")
-                
+
                 else:
                     logger.error("轉錄失敗")
                     translation, summary = "轉錄失敗", "無法生成摘要"
             else:
                 logger.error(f"音頻提取失敗或文件不存在: {output_audio_path}")
+                transcription = ''
                 translation, summary = "音頻提取失敗", "無法生成摘要"
 
         # 處理影片截圖
@@ -183,7 +184,7 @@ def process_video(youtube_url, output_folder, capture_interval=10):
                     os.remove(filepath)
                     logger.info(f"移除舊的截圖: {filepath}")
 
-        video = cv2.VideoCapture('temp_video.mp4')
+        video = cv2.VideoCapture(video_path)
         if not video.isOpened():
             raise IOError("無法打開視頻文件")
 
@@ -217,7 +218,7 @@ def process_video(youtube_url, output_folder, capture_interval=10):
         # 移除重複的圖像
         screenshots = remove_duplicate_images(output_folder, screenshots)
         logger.info(f"去重後的截圖數量: {len(screenshots)}")
-        logging.info(f"翻譯內容 (first 100 characters): {translation[:100]}")
+        logger.info(f"翻譯內容 (first 100 characters): {translation[:100]}")
         result = {
             'title': video_title,
             'youtube_id': video_id,
@@ -229,44 +230,22 @@ def process_video(youtube_url, output_folder, capture_interval=10):
             'processed_at': datetime.now().isoformat(),
             'screenshots': screenshots,
             'transcription': transcription,
-            'translation': translated_vtt,
+            'translation': translation,
             'summary': summary,
             'subtitle_used': subtitle_used
         }
 
-        cleanup_temp_files()
-
         return result
-    
+
     except Exception as e:
         logger.error(f"處理視頻時發生錯誤: {str(e)}", exc_info=True)
-        cleanup_temp_files()
         return {
             'error': str(e),
             'youtube_id': youtube_url.split('v=')[-1] if 'v=' in youtube_url else 'unknown'
         }
+    finally:
+        cleanup_temp_files(work_dir)
 
-
-def download_subtitle(ydl, info, lang, subtitle_dict):
-    try:
-        subtitle_url = subtitle_dict[lang][0]['url']
-        expected_filename = f"{info['id']}.{lang}.vtt"
-        actual_filename = f"temp_video.{lang}.vtt"  # yt-dlp 使用的實際文件名
-
-        ydl.download([subtitle_url])
-
-        if os.path.exists(actual_filename):
-            # 如果需要，重命名文件
-            if actual_filename != expected_filename:
-                os.rename(actual_filename, expected_filename)
-            logger.info(f"成功下載字幕: {expected_filename}")
-            return expected_filename
-        else:
-            logger.warning(f"字幕文件未找到: {actual_filename}")
-            return None
-    except Exception as e:
-        logger.error(f"下載字幕時發生錯誤: {str(e)}")
-        return None
 
 def get_language_name(lang_code):
     language_names = {
@@ -290,11 +269,3 @@ if __name__ == "__main__":
 
     # 列印結果
     print(video_info)
-
-    # 刪除臨時文件
-    if os.path.exists('temp_video.mp4'):
-        os.remove('temp_video.mp4')
-        print("Removed temporary video file: temp_video.mp4")
-    if os.path.exists('temp_audio.mp3'):
-        os.remove('temp_audio.mp3')
-        print("Removed temporary audio file: temp_audio.mp3")
