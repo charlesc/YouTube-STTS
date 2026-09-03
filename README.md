@@ -37,8 +37,8 @@ B. 若沒有合適的字幕檔案：
    cd YouTube-STTS
    ```
 
-2. 安裝依賴:
-   ```
+2. 安裝依賴（建議先建立專屬的虛擬環境，conda 或 venv 皆可，不要裝進系統/共用的 Python 環境——見下方「僅使用 mlx-whisper 時」）:
+   ```bash
    pip install -r requirements.txt
    ```
 
@@ -47,23 +47,27 @@ B. 若沒有合適的字幕檔案：
    - 在macOS上 (使用Homebrew): `brew install ffmpeg`
    - 在Windows上: 下載FFmpeg並將其添加到系統PATH中
 
-4. 安裝 mlx-whisper（在 Apple M1/2/3/4 處理器上進行聲音轉錄，僅在沒有字幕、需要轉錄時才會用到）:
-   - 請參考[mlx-whisper 官方文件](https://pypi.org/project/mlx-whisper/)
-
-5. 翻譯／摘要後端（擇一）:
-
-   **A. Apple Intelligence（預設，`TRANSLATION_BACKEND=apple`）**——完全地端、免額外服務，但只能在有 Apple Intelligence 的 Mac（macOS 26+，系統設定裡「Apple Intelligence」已啟用）上跑：
+4. 地端 Apple 框架（預設後端，翻譯/摘要、語言偵測、語音轉錄都會用到）——只能在 macOS 26+、Apple Intelligence 已啟用的 Mac 上跑：
    ```bash
    cd apple_llm_bridge
    swift build -c release   # 只需 Xcode Command Line Tools，不用裝完整 Xcode.app
    cd ..
    ```
-   注意：`FoundationModels`（Apple Intelligence 用的框架）有內建、無法關閉的內容安全防護，翻譯政治／社會議題等敏感主題的內容時可能會被擋下（`guardrail_violation`）。程式遇到這種情況會自動改用 Ollama 重試，所以**建議即使主要用 Apple 後端，也把下面的 Ollama 設定跑起來當備援**。
+   注意：`FoundationModels`（翻譯/摘要用的框架）有內建、無法關閉的內容安全防護，翻譯政治／社會議題等敏感主題的內容時可能會被擋下（`guardrail_violation`）。程式遇到這種情況會自動改用 Ollama 重試，所以**建議即使主要用 Apple 後端，也把下面的 Ollama 設定跑起來當備援**。語音轉錄用的 `SpeechAnalyzer` 是純語音辨識、沒有這個問題。
 
-   **B. Ollama（`TRANSLATION_BACKEND=ollama`，或 Apple 後端的備援）**：
+5. Ollama（`TRANSLATION_BACKEND=ollama`，或 Apple 翻譯後端被擋下時的備援）：
    - 請按照[Ollama官方文件](https://github.com/jmorganca/ollama)的說明進行安裝。
    - 確保 Ollama 服務正在運行，並監聽在 `http://localhost:11434`（`ollama serve`）。
    - 拉取模型：`ollama pull gemma2:9b`（或透過 `OLLAMA_MODEL_NAME` 環境變數換成別的模型）。
+
+6. mlx-whisper（`TRANSCRIPTION_BACKEND=mlx_whisper`，或 Apple 轉錄後端失敗時的備援；預設的 `'apple'` 轉錄後端不需要這個）：
+   - 請參考[mlx-whisper 官方文件](https://pypi.org/project/mlx-whisper/)
+   - **僅使用 mlx-whisper 時，強烈建議用專屬的虛擬環境**，不要裝進系統/共用的 Python 環境——`mlx-whisper` 依賴 `numba`，而 `numba` 要求 `numpy<2.0`；如果在一個裝了很多其他工具的共用環境裡跑，很容易因為其他套件把 numpy 升到 2.x 而讓 `mlx_whisper` 整個壞掉（`ImportError: Numba needs NumPy 2.0 or less`），修的時候也不能直接在共用環境裡降版 numpy（會波及其他不相關的工具），只能整個重建一個乾淨環境：
+     ```bash
+     conda create -n youtube-stts python=3.11
+     conda activate youtube-stts
+     pip install -r requirements.txt
+     ```
 
 ## 配置
 
@@ -71,6 +75,7 @@ B. 若沒有合適的字幕檔案：
 
 ```bash
 export TRANSLATION_BACKEND=apple      # 或 ollama
+export TRANSCRIPTION_BACKEND=apple    # 或 mlx_whisper
 export FLASK_DEBUG=true               # 開發時才需要
 export OLLAMA_MODEL_NAME=gemma2:9b
 ```
@@ -93,7 +98,9 @@ export OLLAMA_MODEL_NAME=gemma2:9b
 - `main.py`: Flask應用的主入口，`/process_video` 以背景執行緒處理、前端輪詢 `/job_status/<id>` 取得結果
 - `config.py`: 集中管理所有環境相關設定（可用環境變數覆寫）
 - `utils/video_processor.py`: 影片處理的核心邏輯
+- `utils/vtt_cleaner.py`: 清理 YouTube 自動產生字幕的「滾動式」VTT 格式（去重複、合併成完整句子）
 - `utils/vtt_translator.py`: 字幕處理和翻譯/摘要功能，依 `TRANSLATION_BACKEND` 分派到 Apple Intelligence 或 Ollama
+- `utils/video_processor.py` 的 `transcribe_audio()`: 依 `TRANSCRIPTION_BACKEND` 分派語音轉錄到 Apple `SpeechAnalyzer` 或 mlx-whisper
 - `utils/image_processor.py`: 圖像處理和去重複功能
 - `database.py`: 資料庫操作
 - `apple_llm_bridge/`: 獨立的 Swift Package，橋接地端 Apple Intelligence（`FoundationModels` framework）
@@ -106,8 +113,8 @@ export OLLAMA_MODEL_NAME=gemma2:9b
 - Python / Flask
 - OpenCV
 - yt-dlp
-- mlx-whisper（聲音轉錄）
-- Apple Intelligence（`FoundationModels`，透過 `apple_llm_bridge/` 這個 Swift Package）／Ollama（可切換）
+- Apple `Speech`/`SpeechAnalyzer`（語音轉錄）／mlx-whisper（可切換）
+- Apple Intelligence（`FoundationModels`，翻譯/摘要）、`NaturalLanguage`（語言偵測）——都透過 `apple_llm_bridge/` 這個 Swift Package／Ollama（可切換）
 - SQLite
 
 ## 注意事項

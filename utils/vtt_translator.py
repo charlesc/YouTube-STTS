@@ -16,6 +16,10 @@ DetectorFactory.seed = 0
 
 logger = logging.getLogger(__name__)
 
+
+def _noop_progress(message):
+    pass
+
 # 摘要要求模型輸出 HTML（例如 <ul><li>），但轉錄文字最終來自任何人上傳的 YouTube
 # 影片語音/字幕、屬於不受信任的輸入。頁面以 `| safe` 直接輸出摘要 HTML，
 # 因此在這裡先用白名單清洗，只保留摘要真正需要的排版標籤，避免 stored XSS。
@@ -37,8 +41,14 @@ _LANGUAGE_NAMES = {
     'ja': 'Japanese',
 }
 
-# 批次翻譯時，每個請求最多包含幾句字幕（避免單一 prompt 過長、也避免逐句呼叫模型太慢）
+# 批次翻譯時，每個請求最多包含幾句字幕（避免逐句呼叫模型太慢），以及全部
+# 句子加起來的字元數上限（避免單一 prompt 過長）——兩個條件哪個先到就切下
+#一批。字元數上限是實測踩過的真實案例逼出來的：YouTube 自動字幕經過
+# _merge_into_sentences 合併成完整句子後，單句可能長達 15 秒的內容，
+# 20 句一批的固定數量已經不夠，會讓 prompt 超出 FoundationModels
+# 4096 token 的 context window（exceededContextWindowSize）。
 _TRANSLATION_BATCH_SIZE = 20
+_TRANSLATION_BATCH_CHAR_LIMIT = 1200
 
 # Unicode 分區，用來在統計式語言偵測之前，先用字元本身的書寫系統做判斷。
 # langdetect 對中/韓文的短句（尤其標點符號較多、字數少）常誤判——實測同一批
@@ -317,18 +327,40 @@ def _parse_numbered_translation(content, expected_count):
     return [text.strip() for _, text in ordered]
 
 
-def translate_batch(texts, source_language, target_language, batch_size=_TRANSLATION_BATCH_SIZE):
+def _build_translation_batches(texts, batch_size, char_limit):
+    """把句子分批，每批最多 batch_size 句、全部句子加起來不超過 char_limit
+    字元——只看句數的話，句子本身很長時（例如自動字幕合併出來的完整句子）
+    單一批次還是可能超出模型的 context window，所以字元數上限跟句數上限
+    哪個先到就先切下一批。"""
+    batches = []
+    current = []
+    current_len = 0
+    for text in texts:
+        if current and (len(current) >= batch_size or current_len + len(text) > char_limit):
+            batches.append(current)
+            current = []
+            current_len = 0
+        current.append(text)
+        current_len += len(text)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def translate_batch(texts, source_language, target_language, batch_size=_TRANSLATION_BATCH_SIZE, on_progress=None):
     """將多句字幕分批一次送給模型翻譯，取代逐句各發一次請求。
 
     每個批次用 [編號] 標示句子順序，若模型回應的句數或編號對不上（解析失敗），
     該批次會回退為逐句翻譯，確保正確性優先於效能。
     """
+    on_progress = on_progress or _noop_progress
     if source_language == target_language:
         return list(texts)
 
+    batches = _build_translation_batches(texts, batch_size, _TRANSLATION_BATCH_CHAR_LIMIT)
     translated = []
-    for start in range(0, len(texts), batch_size):
-        batch = texts[start:start + batch_size]
+    for batch_index, batch in enumerate(batches):
+        on_progress(f"正在翻譯字幕（第 {batch_index + 1}/{len(batches)} 批）...")
         numbered = "\n".join(f"[{i + 1}] {text}" for i, text in enumerate(batch))
         prompt = (
             f"請將以下用 [編號] 標示的 {source_language} 字幕逐句翻譯為 {target_language}。"
@@ -353,7 +385,8 @@ def translate_batch(texts, source_language, target_language, batch_size=_TRANSLA
     return translated
 
 
-def process_vtt(vtt_content, source_language):
+def process_vtt(vtt_content, source_language, on_progress=None):
+    on_progress = on_progress or _noop_progress
     # 分離 WEBVTT 標頭和內容
     parts = vtt_content.split('\n\n', 1)
     header = parts[0]
@@ -371,7 +404,7 @@ def process_vtt(vtt_content, source_language):
     else:
         # 非中文時才進行批次翻譯
         texts = [text.strip() for _, text in matches]
-        translated_texts = translate_batch(texts, source_language, "Traditional Chinese")
+        translated_texts = translate_batch(texts, source_language, "Traditional Chinese", on_progress=on_progress)
 
         translated_vtt = header + "\n\n"
         all_text_parts = []
@@ -383,24 +416,168 @@ def process_vtt(vtt_content, source_language):
     return translated_vtt.strip(), all_text.strip()
 
 
-def summarize(translated_text):
+# 送進 summarize() 單次呼叫的文字長度上限（字元數，粗略估算，不追求精確
+# token 計算）。實測踩過的真實案例：一支 37 分鐘的影片，完整逐字稿加上
+# 摘要指示的 prompt 一起送給 FoundationModels，總共 4089 token，超過它
+# 4096 token 的 context window 上限，直接失敗（exceededContextWindowSize）。
+# 這是模型結構性的限制，不是靠換 Ollama 後端就能解決的問題——Ollama 預設
+# 的 context window 通常也不大，所以不管哪個後端都需要控制單次送進去的
+# 文字長度，超過門檻時改用分段摘要（map-reduce）：先個別摘要每一段，
+# 再把段落摘要合併成最終摘要。
+_SUMMARY_CHUNK_CHAR_LIMIT = 1800
+
+
+def _split_into_chunks(text, limit=_SUMMARY_CHUNK_CHAR_LIMIT):
+    """把長文字切成不超過 limit 字元的區塊，盡量在句子結尾（。！？）切，
+    避免把一句話從中間硬切開。"""
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    start = 0
+    text_length = len(text)
+    while start < text_length:
+        end = min(start + limit, text_length)
+        if end < text_length:
+            cut = -1
+            for punct in '。！？':
+                pos = text.rfind(punct, start, end)
+                cut = max(cut, pos)
+            if cut > start:
+                end = cut + 1
+        chunks.append(text[start:end])
+        start = end
+    return chunks
+
+
+# "重點" 區塊最多幾個 <li>。這是實測調出來的：原本的 prompt 只說「請用
+# <ul><li> 格式」，沒有明確規範巢狀結構，模型會把「1.主題 2.重點 3.結論
+# 4.總結」四個部分全部攤平成同一層的 <li>，「3-5個關鍵要點」那句話本身也
+# 變成一個空的標題項——尤其是分段摘要合併時（見 _merge_summary_prompt），
+# 模型常常直接把每段落各自的 3-5 點原封不動串在一起，變成十幾二十點的
+# 落落長清單。改用明確的 <h4> 分節 + 範例模板大幅改善，但即使給了「最多
+# 5 點」的指示，實測地端小模型還是不一定會遵守，所以 summarize() 最後
+# 還會用 _cap_bullet_points() 做一層程式碼層的保險。
+_SUMMARY_MAX_BULLET_POINTS = 5
+
+# 四個區塊固定用 <h4> 分節，每個區塊的內容規定包在 <p>/<ul> 裡——不要求
+# 模型自己決定巢狀清單的排版，直接給它填空模板，並且明確禁止新增/刪除/
+# 調換區塊，避免模型自己加上「下次影片見」之類沒被要求的額外章節。
+_SUMMARY_TEMPLATE = """<h4>主題</h4>
+<p>一到兩句話說明{subject_scope}的主要主題或目的。</p>
+<h4>重點</h4>
+<ul>
+<li>第一點</li>
+<li>第二點</li>
+<li>第三點</li>
+</ul>
+<h4>結論</h4>
+<p>重要的結論或呼籲行動；如果內容沒有明確結論，寫「無」。</p>
+<h4>總結</h4>
+<p>總結全文的簡短段落。</p>"""
+
+_SUMMARY_RULES = f"""規則：
+- 每個 <h4> 底下的內容一定要包在 <p> 或 <ul> 裡面，不要直接寫成純文字。
+- 不要使用巢狀的清單（<ul> 裡面不要再放 <ul>）。
+- "重點"底下最多只能有 {_SUMMARY_MAX_BULLET_POINTS} 個 <li>，這是硬性上限，寧可少也不要超過；每個 <li> 只能是一行精簡的句子。
+- 不要輸出範例以外的任何其他章節（例如不要自己加上「下次影片見」、「補充說明」之類的區塊）。"""
+
+
+def _summary_prompt(text):
+    return f"""請根據以下內容，用繁體中文生成一份 HTML 摘要。直接輸出 HTML，不要有任何額外的說明、前言或評論。輸出必須「只包含」以下四個區塊、依序排列，不要新增、刪除或調換順序，不要加上任何其他標題或區塊：
+
+{_SUMMARY_TEMPLATE.format(subject_scope="主要主題或目的")}
+
+{_SUMMARY_RULES}
+
+請基於以下內容生成：
+{text}
+"""
+
+
+def _merge_summary_prompt(text):
+    """合併分段摘要（map-reduce）用的最終摘要 prompt，跟 _summary_prompt
+    分開設計：這裡收到的是同一支影片好幾段各自的重點筆記，需要的是「統整、
+    去除跨段落重複的主題」，而不是像 _summary_prompt 那樣單純把一段文字
+    摘要出來——原本兩種情境共用同一個 prompt，模型常常直接把每段落的
+    要點原封不動串接，而不是真的重新整理。
+    """
+    return f"""以下是同一支影片依時間順序、不同段落各自的簡短摘要段落。請通讀全部段落，統整成一份 HTML 摘要——如果不同段落提到相近或重複的主題，請合併成同一個要點，不要重複列出。直接輸出 HTML，不要有任何額外的說明、前言或評論。輸出必須「只包含」以下四個區塊、依序排列，不要新增、刪除或調換順序，不要加上任何其他標題或區塊：
+
+{_SUMMARY_TEMPLATE.format(subject_scope="整支影片")}
+
+{_SUMMARY_RULES}
+
+以下是各段落摘要：
+{text}
+"""
+
+
+def _partial_summary_prompt(text):
+    # 刻意要求「一段話、不要條列」而非跟之前一樣要求 3-5 點條列：如果每段
+    # 落都先各自條列出 3-5 點，合併步驟收到的就是十幾二十個現成的
+    # <li>，模型很容易偷懶直接全部照抄而不是真的重新統整。改成短段落，
+    # 逼合併步驟必須自己重新從敘述中提煉重點。
+    return (
+        "請用繁體中文，以一段 2 到 3 句話的簡短段落（不要條列、不要用任何項目符號），"
+        "說明以下這段影片逐字稿在講什麼、有哪個最重要的重點"
+        "（這只是整支影片其中一段，不需要開頭或結尾語，不要做其他任何回覆或說明）：\n"
+        f"{text}"
+    )
+
+
+_LI_RE = re.compile(r'<li>.*?</li>', re.DOTALL)
+
+
+def _cap_bullet_points(html, max_items=_SUMMARY_MAX_BULLET_POINTS):
+    """安全網：不管 prompt 怎麼要求，地端小模型還是可能輸出超過
+    max_items 個 <li>（實測踩過：分段摘要合併時，模型把每段落的 3-5 點
+    原封不動串接，變成十幾二十點）。只保留前 max_items 個，其餘直接砍掉，
+    確保使用者看到的摘要一定符合「精簡」這個目標，不依賴模型自律。
+    """
+    matches = list(_LI_RE.finditer(html))
+    if len(matches) <= max_items:
+        return html
+    remove_start = matches[max_items].start()
+    remove_end = matches[-1].end()
+    return html[:remove_start] + html[remove_end:]
+
+
+def summarize(translated_text, on_progress=None):
     """為已經是繁體中文的文字產生摘要，回傳的 HTML 已用白名單清洗過。
 
     只接受「已翻譯完成」的文字：呼叫端（`process_vtt` 的輸出）已經保證內容是
     繁體中文，這裡不會重新偵測語言或嘗試翻譯，避免重複呼叫模型。
+
+    文字太長時（見 _SUMMARY_CHUNK_CHAR_LIMIT）先分段各自摘要重點，再把
+    段落摘要合併起來做最終摘要，避免超出模型的 context window。
     """
-    prompt = f"""請根據以下影片轉錄文字稿生成一份簡潔的繁體中文摘要（直接回答，不要做其他說明或評論，並提供HTML格式的內容，例如<ul><li>）。摘要應包含以下內容:
+    on_progress = on_progress or _noop_progress
+    chunks = _split_into_chunks(translated_text)
 
-            1. 影片的主要主題或目的
-            2. 3-5個關鍵要點或主要論點
-            3. 任何重要的結論或呼籲行動
-            4. 總結全文的簡短段落
+    if len(chunks) == 1:
+        on_progress("正在產生摘要...")
+        raw_summary = _generate(_summary_prompt(chunks[0]))
+    else:
+        logger.info(f"轉錄文字過長（{len(translated_text)} 字），分成 {len(chunks)} 段分別摘要後再合併")
+        partial_summaries = []
+        for i, chunk in enumerate(chunks):
+            on_progress(f"逐字稿較長，正在分段摘要（第 {i + 1}/{len(chunks)} 段）...")
+            partial_summaries.append(_generate(_partial_summary_prompt(chunk)))
+        combined_partial_summaries = '\n\n'.join(partial_summaries)
+        # 段落摘要合併後如果還是太長（極長的影片、段落數很多），再分一次
+        # 段——遞迴而非無限迴圈：只要 _split_into_chunks 對合併後文字的
+        # 判斷跟這次不同（因為內容縮短了很多），就不會無窮遞迴。
+        if len(combined_partial_summaries) > _SUMMARY_CHUNK_CHAR_LIMIT:
+            return summarize(combined_partial_summaries, on_progress=on_progress)
+        on_progress("正在合併分段摘要...")
+        # 合併步驟用專門的 prompt（_merge_summary_prompt），不是重複使用
+        # _summary_prompt——收到的是好幾段各自的重點筆記，需要的是統整、
+        # 去除跨段落重複，而不是單純摘要一段文字。
+        raw_summary = _generate(_merge_summary_prompt(combined_partial_summaries))
 
-            請基於以下內容生成：：
-            {translated_text}
-            """
-    raw_summary = _generate(prompt)
-    return bleach.clean(raw_summary, tags=_SUMMARY_ALLOWED_TAGS, attributes={}, strip=True)
+    cleaned_summary = bleach.clean(raw_summary, tags=_SUMMARY_ALLOWED_TAGS, attributes={}, strip=True)
+    return _cap_bullet_points(cleaned_summary)
 
 
 def translate_and_summarize(text):

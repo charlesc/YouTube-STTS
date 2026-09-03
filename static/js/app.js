@@ -21,6 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const job = await response.json();
                 if (job.status === 'processing') {
+                    if (message && job.progress) message.textContent = job.progress;
                     return; // 繼續等待下一次輪詢
                 }
 

@@ -38,7 +38,13 @@ APPLE_LLM_BRIDGE_PATH = os.environ.get(
 )
 APPLE_LLM_TIMEOUT_SECONDS = int(os.environ.get('APPLE_LLM_TIMEOUT_SECONDS', '120'))
 
-# mlx-whisper
+# 語音轉錄後端：'apple'（地端 Speech / SpeechAnalyzer，預設）或 'mlx_whisper'
+# 'apple' 只能在有 SpeechAnalyzer 的 Mac（macOS 26+）上跑，完全不需要 mlx-whisper
+# 那條 numpy/numba 的 Python 依賴鏈；'mlx_whisper' 保留給非 Mac 主機部署，
+# 或 apple 轉錄失敗時的備援（transcribe_audio() 會自動 fallback）。
+TRANSCRIPTION_BACKEND = os.environ.get('TRANSCRIPTION_BACKEND', 'apple')
+
+# mlx-whisper——僅在 TRANSCRIPTION_BACKEND=mlx_whisper，或 apple 轉錄失敗需要備援時使用
 WHISPER_MODEL_REPO = os.environ.get('WHISPER_MODEL_REPO', 'mlx-community/whisper-large-v3-mlx')
 
 # 支援的字幕/語言優先順序

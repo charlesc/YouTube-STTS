@@ -1,20 +1,24 @@
 import Foundation
 import FoundationModels
 import NaturalLanguage
+import Speech
+import AVFoundation
 
 // 極簡的 stdin(JSON) -> stdout(JSON) 橋接工具，讓 Python 端可以用 subprocess
-// 呼叫地端的 Apple 框架做翻譯/摘要/語言偵測，不需要引入完整的 Xcode App
-// 或額外的 HTTP server。
+// 呼叫地端的 Apple 框架做翻譯/摘要/語言偵測/語音轉錄，不需要引入完整的
+// Xcode App 或額外的 HTTP server。
 //
 // 輸入（stdin，一行 JSON）：
 //   生成（翻譯/摘要，預設模式）：{"mode": "generate", "prompt": "..."}（"mode" 可省略）
 //   語言偵測：{"mode": "detect_language", "text": "..."}
+//   語音轉錄：{"mode": "transcribe", "audio_path": "...", "locale": "en-US"}
 // 輸出（stdout，一行 JSON）：
 //   生成成功：{"status": "ok", "content": "..."}
 //   語言偵測成功：{"status": "ok", "language": "..."}
+//   轉錄成功：{"status": "ok", "segments": [{"start": 0.0, "end": 1.91, "text": "..."}]}
 //   失敗：{"status": "error", "error": "...", "reason":
 //     "unavailable" | "generation_failed" | "invalid_input" |
-//     "guardrail_violation" | "refusal_detected"}
+//     "guardrail_violation" | "refusal_detected" | "unsupported_locale"}
 //
 // 注意：故意不要用 `Task { ... } + DispatchSemaphore.wait()` 包裝——
 // 這個組合在主執行緒上會死鎖（FoundationModels 的非同步呼叫似乎需要用到主執行緒，
@@ -28,6 +32,8 @@ struct Request: Decodable {
     var mode: String?
     var prompt: String?
     var text: String?
+    var audio_path: String?
+    var locale: String?
 }
 
 struct GenerateSuccessResponse: Encodable {
@@ -38,6 +44,17 @@ struct GenerateSuccessResponse: Encodable {
 struct LanguageSuccessResponse: Encodable {
     let status = "ok"
     let language: String
+}
+
+struct TranscribeSegment: Encodable {
+    let start: Double
+    let end: Double
+    let text: String
+}
+
+struct TranscribeSuccessResponse: Encodable {
+    let status = "ok"
+    let segments: [TranscribeSegment]
 }
 
 struct ErrorResponse: Encodable {
@@ -130,7 +147,15 @@ func generate(_ prompt: String) async {
 
     do {
         let session = LanguageModelSession(model: generationModel)
-        let response = try await session.respond(to: prompt)
+        // maximumResponseTokens 上限：實測發現 exceededContextWindowSize
+        // 不是單純「輸入太長」造成的——同一段輸入文字重跑，有時候會失敗、
+        // 有時候不會，且輸入字數跟是否失敗沒有穩定的對應關係。真正原因是
+        // context window（4096 token）算的是輸入加輸出的總和，模型偶爾會
+        // 生成異常冗長或跑掉的回應（呼應 Python 那邊已知的重複迴圈退化
+        // 問題），把輸出長度也一起吃光了額度。限制回應長度上限可以同時
+        // 從根本降低這兩個問題的發生機率。
+        let options = GenerationOptions(maximumResponseTokens: 1024)
+        let response = try await session.respond(to: prompt, options: options)
 
         if looksLikeRefusal(response.content) {
             fail(
@@ -154,6 +179,62 @@ func generate(_ prompt: String) async {
     }
 }
 
+// MARK: - 語音轉錄（Speech / SpeechAnalyzer + SpeechTranscriber）
+//
+// 這是 macOS 26 新的語音辨識 API（跟舊版 SFSpeechRecognizer 是不同東西），
+// 完全地端執行、不是生成式模型，沒有 guardrail 疑慮。實測過 SpeechTranscriber
+// 支援的語言（zh-TW/zh-CN/zh-HK/en-*/ja-JP/ko-KR 等）剛好涵蓋這個 app 需要的
+// 語言；轉錄品質對乾淨語音（TTS）幾乎完全正確，對真實世界音訊（背景音、
+// 口語含糊）也可用，跟 whisper 一樣會有偶發的辨識誤差。
+
+func transcribe(audioPath: String, localeIdentifier: String) async {
+    let locale = Locale(identifier: localeIdentifier)
+    let supported = await SpeechTranscriber.supportedLocales
+    guard supported.contains(where: { $0.identifier(.bcp47) == locale.identifier(.bcp47) }) else {
+        fail("SpeechAnalyzer 不支援語言: \(localeIdentifier)", reason: "unsupported_locale")
+    }
+
+    let transcriber = SpeechTranscriber(
+        locale: locale,
+        transcriptionOptions: [],
+        reportingOptions: [],
+        attributeOptions: [.audioTimeRange]
+    )
+    let analyzer = SpeechAnalyzer(modules: [transcriber])
+
+    do {
+        // 對應語言的模型資源第一次使用時可能需要下載（實測常見語言通常
+        // 已經隨系統安裝好，這裡呼叫是保險，已安裝的話幾乎立即回傳）。
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            try await request.downloadAndInstall()
+        }
+
+        let audioFile = try AVAudioFile(forReading: URL(fileURLWithPath: audioPath))
+
+        // Task 閉包直接回傳收集到的結果，而不是捕捉、修改外層的 var——
+        // Swift 嚴格併發檢查會把後者當成潛在的資料競爭擋下來。
+        let resultsTask = Task { () -> [TranscribeSegment] in
+            var collected: [TranscribeSegment] = []
+            for try await result in transcriber.results where result.isFinal {
+                let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { continue }
+                let start = result.range.start.seconds
+                let end = (result.range.start + result.range.duration).seconds
+                collected.append(TranscribeSegment(start: start, end: end, text: text))
+            }
+            return collected
+        }
+
+        _ = try await analyzer.analyzeSequence(from: audioFile)
+        try await analyzer.finalizeAndFinishThroughEndOfInput()
+        let segments = try await resultsTask.value
+
+        writeJSON(TranscribeSuccessResponse(segments: segments))
+    } catch {
+        fail("語音轉錄失敗：\(error)", reason: "generation_failed")
+    }
+}
+
 // MARK: - 進入點
 
 let inputData = FileHandle.standardInput.readDataToEndOfFile()
@@ -172,6 +253,11 @@ case "generate":
         fail("generate 模式需要 {\"prompt\": \"...\"}", reason: "invalid_input")
     }
     await generate(prompt)
+case "transcribe":
+    guard let audioPath = request.audio_path, let localeIdentifier = request.locale else {
+        fail("transcribe 模式需要 {\"audio_path\": \"...\", \"locale\": \"...\"}", reason: "invalid_input")
+    }
+    await transcribe(audioPath: audioPath, localeIdentifier: localeIdentifier)
 default:
     fail("未知的 mode: \(request.mode ?? "nil")", reason: "invalid_input")
 }
