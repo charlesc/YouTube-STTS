@@ -358,6 +358,31 @@ def test_pick_subtitle_language_falls_back_to_priority_list_when_native_language
     assert vp._pick_subtitle_language(info) == 'zh-Hant'
 
 
+# 迴歸測試：真實踩過的第二個 bug（5bxp78i96S8，PG 的英文訪談）。
+# info['language'] 有時候是帶地區碼的完整 locale（例如 'en-US'），但
+# subtitles/automatic_captions 字典的 key 常常是不帶地區碼的短代碼
+# （'en'）。只做精確字串比對的話，'en-US' in auto 是 False，於是照樣掉回
+# SUBTITLE_LANGS 的 fallback 順序、選到排在 en 前面的 zh-Hant 自動翻譯
+# 版本——跟完全沒有 info['language'] 時一樣的錯誤結果。修法是精確比對
+# 失敗時，再用主要語言子代碼（'-' 前面那段）比對一次。
+def test_pick_subtitle_language_matches_native_language_ignoring_region_subtag():
+    info = {
+        'language': 'en-US',
+        'subtitles': {},
+        'automatic_captions': {'en': [{}], 'zh-Hant': [{}]},
+    }
+    assert vp._pick_subtitle_language(info) == 'en'
+
+
+def test_pick_subtitle_language_matches_native_language_ignoring_region_subtag_manual():
+    info = {
+        'language': 'en-US',
+        'subtitles': {'en': [{}], 'zh-TW': [{}]},
+        'automatic_captions': {},
+    }
+    assert vp._pick_subtitle_language(info) == 'en'
+
+
 # --- 語音轉錄後端（config.TRANSCRIPTION_BACKEND）---
 
 def test_pick_speech_locale_maps_detected_language_to_locale(monkeypatch):

@@ -221,6 +221,16 @@ def _pick_subtitle_language(info):
     語言；人工字幕至少是人工提供的文字、不是機器二次翻譯，用這個順序挑選
     風險較低，但 automatic_captions 在這個 fallback 分支還是可能挑到
     翻譯版本，這是已知、暫時無法根治的限制（除非改成連 tlang 參數都檢查）。
+
+    真實踩過的第二個 bug（5bxp78i96S8，PG 的英文訪談）：info['language']
+    有時候是帶地區碼的完整 locale（例如 'en-US'），但 subtitles/
+    automatic_captions 字典的 key 常常是不帶地區碼的短代碼（例如 'en'）。
+    只做精確字串比對的話，'en-US' in auto 會是 False，於是照樣掉回
+    SUBTITLE_LANGS 的 fallback 順序、選到排在 en 前面的 zh-Hant 自動翻譯
+    版本——跟完全沒有 info['language'] 時一樣的錯誤結果。修法：精確比對
+    失敗時，再用「主要語言子代碼」（'-' 前面那段）比對一次，找到就直接用，
+    比精確比對失敗就整個放棄優先順序邏輯更準確；真的兩種比對都找不到，
+    才走原本的 SUBTITLE_LANGS fallback。
     """
     manual = info.get('subtitles') or {}
     auto = info.get('automatic_captions') or {}
@@ -231,6 +241,14 @@ def _pick_subtitle_language(info):
             return native_lang
         if native_lang in auto:
             return native_lang
+        # 精確比對失敗時，退而求其次比對主要語言子代碼（'en-US' -> 'en'）。
+        native_primary = native_lang.split('-')[0].lower()
+        for lang in manual:
+            if lang.split('-')[0].lower() == native_primary:
+                return lang
+        for lang in auto:
+            if lang.split('-')[0].lower() == native_primary:
+                return lang
 
     for lang in config.SUBTITLE_LANGS:
         if lang in manual:
