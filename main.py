@@ -2,6 +2,7 @@ import os
 import logging
 import threading
 import uuid
+import itertools
 from flask import Flask, render_template, request, jsonify
 from utils.video_processor import process_video # 確保導入所需函數
 from database import init_db, get_all_videos, add_video, update_video, dump_database, search_videos, delete_video
@@ -242,16 +243,32 @@ def process_video_data(video_info):
     for i, screenshot in enumerate(screenshots):
         current_time = float(screenshot['timestamp'].replace('s', ''))
         next_time = float(screenshots[i+1]['timestamp'].replace('s', '')) if i+1 < len(screenshots) else float('inf')
-        
+
         matching_translated = find_matching_subtitles(current_time, next_time, translated_subtitles)
         matching_original = find_matching_subtitles(current_time, next_time, original_subtitles)
-        
+
+        # 頁面上要「每一句原文緊接在對應譯文下方」，不是譯文、原文各自整塊
+        # 分開顯示，方便比對——process_vtt() 保證翻譯後的 VTT 跟原文用同一組
+        # 時間戳記、一對一對應，所以這裡用 zip_longest 依序配對就好；用
+        # zip_longest 而非 zip 是為了在兩邊句數萬一對不上時（理論上不該發生，
+        # 但不假設一定成立）也不會直接漏掉多出來的句子，只是配對的那一句
+        # 會是 None，模板那邊本來就會跳過空值不顯示。
+        subtitle_pairs = [
+            {
+                'translated': translated,
+                'original': original,
+                'speaker_changed': (translated or original or {}).get('speaker_changed', False),
+            }
+            for translated, original in itertools.zip_longest(matching_translated, matching_original)
+        ]
+
         paired_data.append({
             'screenshot': screenshot,
             'translated_subtitles': matching_translated,
-            'original_subtitles': matching_original
+            'original_subtitles': matching_original,
+            'subtitle_pairs': subtitle_pairs,
         })
-    
+
     return paired_data
 
 def timestamp_to_seconds(timestamp):

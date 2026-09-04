@@ -61,6 +61,40 @@ def test_process_video_data_pairs_screenshots_with_subtitles():
     assert paired[1]['translated_subtitles'][0]['text'] == 'World'
     assert paired[1]['original_subtitles'][0]['text'] == 'Original World'
 
+    # subtitle_pairs 讓模板可以把每一句原文緊接顯示在對應譯文下方，
+    # 而不是譯文、原文各自整塊分開（見 process_video_data 裡的說明）。
+    assert paired[0]['subtitle_pairs'][0]['translated']['text'] == 'Hello'
+    assert paired[0]['subtitle_pairs'][0]['original']['text'] == 'Original Hello'
+    assert paired[1]['subtitle_pairs'][0]['translated']['text'] == 'World'
+    assert paired[1]['subtitle_pairs'][0]['original']['text'] == 'Original World'
+
+
+def test_process_video_data_pairs_by_zip_longest_when_counts_mismatch():
+    """理論上翻譯跟原文應該句數一致（process_vtt() 保證用同一組時間戳記），
+    但不假設一定成立：句數對不上時，多出來的句子不該被直接漏掉，只是配對
+    的另一邊會是 None（模板那邊本來就會跳過空值不顯示）。"""
+    video_info = {
+        'screenshots': [{'filename': 'a.jpg', 'timestamp': '0.00s'}],
+        'translation': (
+            "WEBVTT\n\n"
+            "00:00:00.000 --> 00:00:02.000\nHello\n\n"
+            "00:00:03.000 --> 00:00:04.000\nExtra translated only\n\n"
+        ),
+        'transcription': (
+            "WEBVTT\n\n"
+            "00:00:00.000 --> 00:00:02.000\nOriginal Hello\n\n"
+        ),
+    }
+
+    paired = main.process_video_data(video_info)
+
+    pairs = paired[0]['subtitle_pairs']
+    assert len(pairs) == 2
+    assert pairs[0]['translated']['text'] == 'Hello'
+    assert pairs[0]['original']['text'] == 'Original Hello'
+    assert pairs[1]['translated']['text'] == 'Extra translated only'
+    assert pairs[1]['original'] is None
+
 
 def test_process_video_data_handles_null_transcription_from_db():
     """迴歸測試：轉錄失敗但字幕/翻譯仍然存在時，資料庫裡的 transcription
@@ -79,6 +113,7 @@ def test_process_video_data_handles_null_transcription_from_db():
     assert len(paired) == 1
     assert paired[0]['translated_subtitles'] == []
     assert paired[0]['original_subtitles'] == []
+    assert paired[0]['subtitle_pairs'] == []
 
 
 def test_process_video_route_starts_a_background_job(monkeypatch):

@@ -91,38 +91,24 @@
                         <div class="shot-time">{{ item.screenshot.timestamp | format_timestamp }}</div>
                     </a>
                     <div class="shot-body">
-                        <div class="shot-lang">
-                            {% if item.translated_subtitles %}
-                            {% for subtitle in item.translated_subtitles %}
-                            {% if subtitle.speaker_changed %}
-                            <div class="speaker-tag">
-                                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
-                                換人講話
-                            </div>
-                            {% endif %}
-                            <p class="shot-text">{{ subtitle.text }}</p>
-                            {% endfor %}
-                            {% else %}
-                            <p class="shot-text shot-empty">（此片段沒有對應字幕）</p>
-                            {% endif %}
+                        {% if item.subtitle_pairs %}
+                        {% for pair in item.subtitle_pairs %}
+                        {% if pair.speaker_changed %}
+                        <div class="speaker-tag">
+                            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
+                            換人講話
                         </div>
-
-                        <div class="shot-lang shot-lang-original" data-lang="original" hidden>
-                            <div class="shot-lang-label">原文</div>
-                            {% if item.original_subtitles %}
-                            {% for subtitle in item.original_subtitles %}
-                            {% if subtitle.speaker_changed %}
-                            <div class="speaker-tag">
-                                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
-                                換人講話
-                            </div>
-                            {% endif %}
-                            <p class="shot-text">{{ subtitle.text }}</p>
-                            {% endfor %}
-                            {% else %}
-                            <p class="shot-text shot-empty">（此片段沒有對應字幕）</p>
-                            {% endif %}
-                        </div>
+                        {% endif %}
+                        {% if pair.translated %}
+                        <p class="shot-text">{{ pair.translated.text }}</p>
+                        {% endif %}
+                        {% if pair.original %}
+                        <p class="shot-text shot-text-original" data-lang="original" hidden>{{ pair.original.text }}</p>
+                        {% endif %}
+                        {% endfor %}
+                        {% else %}
+                        <p class="shot-text shot-empty">（此片段沒有對應字幕）</p>
+                        {% endif %}
                     </div>
                 </div>
                 {% endfor %}
