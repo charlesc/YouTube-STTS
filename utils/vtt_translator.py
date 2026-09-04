@@ -385,6 +385,29 @@ def translate_batch(texts, source_language, target_language, batch_size=_TRANSLA
     return translated
 
 
+_VTT_LANGUAGE_LINE_RE = re.compile(r'^(Language:\s*).*$', re.MULTILINE)
+
+# process_vtt() 實際做的翻譯永遠是「翻成繁體中文」（下面呼叫 translate_batch()
+# 時目標語言寫死是 "Traditional Chinese"），這裡是 VTT 檔頭 Language: 那行要
+# 寫的語言代碼，跟 config.SUBTITLE_LANGS 裡代表繁體中文的代碼一致。
+_TRANSLATED_VTT_LANGUAGE_CODE = 'zh-Hant'
+
+
+def _set_vtt_header_language(header, language_code):
+    """把 VTT 檔頭裡 `Language: xx` 那行換成 language_code。
+
+    真實踩過的 bug：翻譯後的 VTT 檔頭沿用了原文字幕的 header，內容明明已經
+    翻成繁體中文，Language 那行卻還寫著原文的語言代碼（例如英文字幕翻完
+    還是 `Language: en`）——這行本身不影響頁面顯示（沒有任何地方讀它），
+    但使用者展開「進階：原始逐字稿」時會看到跟內容對不上的語言標示。
+    只有原文檔頭本來就有 Language 行才動它（例如本地語音轉錄產生的檔頭只有
+    單獨一行 `WEBVTT`，沒有 Language 行，這種情況不用也不該硬加一行）。
+    """
+    if _VTT_LANGUAGE_LINE_RE.search(header):
+        return _VTT_LANGUAGE_LINE_RE.sub(rf'\g<1>{language_code}', header, count=1)
+    return header
+
+
 def process_vtt(vtt_content, source_language, on_progress=None):
     on_progress = on_progress or _noop_progress
     # 分離 WEBVTT 標頭和內容
@@ -398,7 +421,7 @@ def process_vtt(vtt_content, source_language, on_progress=None):
 
     # 检查是否为中文
     if _is_chinese(source_language):
-        # 如果是中文，直接使用原文
+        # 如果是中文，直接使用原文（Language 行本來就是中文，不用改）
         translated_vtt = vtt_content
         all_text = " ".join(text.strip() for _, text in matches)
     else:
@@ -406,7 +429,8 @@ def process_vtt(vtt_content, source_language, on_progress=None):
         texts = [text.strip() for _, text in matches]
         translated_texts = translate_batch(texts, source_language, "Traditional Chinese", on_progress=on_progress)
 
-        translated_vtt = header + "\n\n"
+        translated_header = _set_vtt_header_language(header, _TRANSLATED_VTT_LANGUAGE_CODE)
+        translated_vtt = translated_header + "\n\n"
         all_text_parts = []
         for (timestamp, _), translated_text in zip(matches, translated_texts):
             translated_vtt += f"{timestamp}\n{translated_text}\n\n"

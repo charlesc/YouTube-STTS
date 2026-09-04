@@ -61,6 +61,57 @@ def test_process_vtt_non_chinese_source_translates_each_cue(monkeypatch):
     assert all_text == "翻譯結果"
 
 
+def test_process_vtt_updates_language_line_in_header(monkeypatch):
+    """迴歸測試：翻譯後的 VTT 檔頭原本沿用原文字幕的 header，內容已經翻成
+    繁體中文，Language 那行卻還寫著原文的語言代碼（例如英文字幕翻完還是
+    `Language: en`）。"""
+    _use_ollama_backend(monkeypatch)
+
+    class FakeChoice:
+        def __init__(self, content):
+            self.message = types.SimpleNamespace(content=content)
+
+    class FakeResponse:
+        def __init__(self, content):
+            self.choices = [FakeChoice(content)]
+
+    monkeypatch.setattr(
+        vt.client.chat.completions, "create",
+        lambda model, messages: FakeResponse("翻譯結果"),
+    )
+
+    vtt = "WEBVTT\nKind: captions\nLanguage: en\n\n00:00:00.000 --> 00:00:02.000\nHello\n\n"
+    translated_vtt, _ = vt.process_vtt(vtt, "English")
+
+    assert "Language: zh-Hant" in translated_vtt
+    assert "Language: en" not in translated_vtt
+    assert "Kind: captions" in translated_vtt
+
+
+def test_process_vtt_leaves_header_without_language_line_untouched(monkeypatch):
+    """本地語音轉錄產生的檔頭只有單獨一行 WEBVTT，沒有 Language 行——這種
+    情況不該被硬加一行進去。"""
+    _use_ollama_backend(monkeypatch)
+
+    class FakeChoice:
+        def __init__(self, content):
+            self.message = types.SimpleNamespace(content=content)
+
+    class FakeResponse:
+        def __init__(self, content):
+            self.choices = [FakeChoice(content)]
+
+    monkeypatch.setattr(
+        vt.client.chat.completions, "create",
+        lambda model, messages: FakeResponse("翻譯結果"),
+    )
+
+    vtt = "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nHello\n\n"
+    translated_vtt, _ = vt.process_vtt(vtt, "English")
+
+    assert "Language:" not in translated_vtt
+
+
 def test_translate_text_short_circuits_when_languages_match(monkeypatch):
     _use_ollama_backend(monkeypatch)
 
