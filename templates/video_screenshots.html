@@ -59,10 +59,10 @@
                 </div>
             </div>
 
-            <div class="segmented" id="langToggle">
-                <button type="button" class="is-active" data-mode="translated">翻譯</button>
-                <button type="button" data-mode="original">原文</button>
-            </div>
+            <button type="button" class="btn btn-ghost" id="toggleOriginal" aria-pressed="false">
+                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                <span id="toggleOriginalLabel">顯示原文</span>
+            </button>
         </div>
 
         <div class="section">
@@ -91,33 +91,38 @@
                         <div class="shot-time">{{ item.screenshot.timestamp | format_timestamp }}</div>
                     </a>
                     <div class="shot-body">
-                        {% if item.translated_subtitles %}
-                        {% for subtitle in item.translated_subtitles %}
-                        {% if subtitle.speaker_changed %}
-                        <div class="speaker-tag" data-lang="translated">
-                            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
-                            換人講話
+                        <div class="shot-lang">
+                            {% if item.translated_subtitles %}
+                            {% for subtitle in item.translated_subtitles %}
+                            {% if subtitle.speaker_changed %}
+                            <div class="speaker-tag">
+                                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
+                                換人講話
+                            </div>
+                            {% endif %}
+                            <p class="shot-text">{{ subtitle.text }}</p>
+                            {% endfor %}
+                            {% else %}
+                            <p class="shot-text shot-empty">（此片段沒有對應字幕）</p>
+                            {% endif %}
                         </div>
-                        {% endif %}
-                        <p class="shot-text" data-lang="translated">{{ subtitle.text }}</p>
-                        {% endfor %}
-                        {% else %}
-                        <p class="shot-text shot-empty" data-lang="translated">（此片段沒有對應字幕）</p>
-                        {% endif %}
 
-                        {% if item.original_subtitles %}
-                        {% for subtitle in item.original_subtitles %}
-                        {% if subtitle.speaker_changed %}
-                        <div class="speaker-tag is-hidden" data-lang="original">
-                            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
-                            換人講話
+                        <div class="shot-lang shot-lang-original" data-lang="original" hidden>
+                            <div class="shot-lang-label">原文</div>
+                            {% if item.original_subtitles %}
+                            {% for subtitle in item.original_subtitles %}
+                            {% if subtitle.speaker_changed %}
+                            <div class="speaker-tag">
+                                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
+                                換人講話
+                            </div>
+                            {% endif %}
+                            <p class="shot-text">{{ subtitle.text }}</p>
+                            {% endfor %}
+                            {% else %}
+                            <p class="shot-text shot-empty">（此片段沒有對應字幕）</p>
+                            {% endif %}
                         </div>
-                        {% endif %}
-                        <p class="shot-text is-hidden" data-lang="original">{{ subtitle.text }}</p>
-                        {% endfor %}
-                        {% else %}
-                        <p class="shot-text shot-empty is-hidden" data-lang="original">（此片段沒有對應字幕）</p>
-                        {% endif %}
                     </div>
                 </div>
                 {% endfor %}
@@ -156,20 +161,22 @@
     <script>
         Fancybox.bind("[data-fancybox]", { caption: { type: "html" } });
 
-        // 原文／翻譯切換：單一控制點同時影響截圖旁的字幕跟「換人講話」標記，
-        // 不會像舊版一樣切一半（下方原始逐字稿是獨立的「進階」區塊，兩種語言
-        // 本來就並排顯示，不受這個切換影響）。
+        // 「顯示原文」是疊加顯示，不是切換：翻譯字幕本來就一直顯示，這顆按鈕
+        // 只負責額外顯示/隱藏原文區塊，方便兩種語言對照著看，跟舊版行為一致
+        // （下方原始逐字稿是獨立的「進階」區塊，兩種語言本來就並排顯示，不受
+        // 這個開關影響）。
         document.addEventListener('DOMContentLoaded', function () {
-            const toggle = document.getElementById('langToggle');
-            if (!toggle) return;
-            const buttons = toggle.querySelectorAll('button');
-            buttons.forEach((btn) => {
-                btn.addEventListener('click', () => {
-                    const mode = btn.dataset.mode;
-                    buttons.forEach((b) => b.classList.toggle('is-active', b === btn));
-                    document.querySelectorAll('[data-lang]').forEach((el) => {
-                        el.classList.toggle('is-hidden', el.dataset.lang !== mode);
-                    });
+            const toggleBtn = document.getElementById('toggleOriginal');
+            const toggleLabel = document.getElementById('toggleOriginalLabel');
+            if (!toggleBtn) return;
+
+            let showOriginal = false;
+            toggleBtn.addEventListener('click', () => {
+                showOriginal = !showOriginal;
+                toggleBtn.setAttribute('aria-pressed', String(showOriginal));
+                if (toggleLabel) toggleLabel.textContent = showOriginal ? '隱藏原文' : '顯示原文';
+                document.querySelectorAll('[data-lang="original"]').forEach((el) => {
+                    el.hidden = !showOriginal;
                 });
             });
         });

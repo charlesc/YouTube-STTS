@@ -373,28 +373,6 @@ tbody tr:hover { background: var(--surface-alt); }
 }
 .chip.accent { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 
-.segmented {
-  flex: none;
-  display: flex;
-  background: var(--surface-alt);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 3px;
-  gap: 2px;
-}
-.segmented button {
-  border: none;
-  background: transparent;
-  padding: 9px 18px;
-  border-radius: 8px;
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-family: inherit;
-}
-.segmented button.is-active { background: #fff; color: var(--text); box-shadow: 0 1px 2px rgba(16, 24, 40, .08); }
-
 .summary-card { padding: 26px 28px; }
 .summary-card :is(h1, h2, h3, h4) { font-size: 13px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; margin: 20px 0 8px; }
 .summary-card :is(h1, h2, h3, h4):first-child { margin-top: 0; }
@@ -440,8 +418,23 @@ tbody tr:hover { background: var(--surface-alt); }
 }
 .shot-text { font-size: 13.5px; line-height: 1.6; color: var(--text); margin: 0 0 6px; }
 .shot-text:last-child { margin-bottom: 0; }
-.shot-text.is-hidden { display: none; }
 .shot-empty { font-size: 12.5px; color: var(--text-muted); font-style: normal; }
+
+/* 原文區塊：疊加顯示在翻譯下方，方便對照，不是切換頁籤 */
+.shot-lang-original {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.shot-lang-original .shot-text { color: var(--text-muted); }
+.shot-lang-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin-bottom: 6px;
+}
 
 .disclosure { margin-top: 28px; }
 .disclosure-head {
