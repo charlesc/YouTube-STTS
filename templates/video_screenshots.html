@@ -1,123 +1,178 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="zh-Hant">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ video.title }}</title>
-    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
-    <!-- 添加 Fancybox CSS -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fancyapps/ui@4.0/dist/fancybox.css"/>
-    <link href="../static/css/style.css" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
 </head>
-<body class="bg-gray-100">
-    <div class="container mx-auto px-4 py-8">
-        <h1 class="text-3xl font-bold mb-4">{{ video.title }}</h1>
-        <p style="text-align:right;"><a href="{{ url_for('index') }}">Back to Index</a></p>
-        <ul class="list-disc list-inside mb-4">
-            <li>創作者：{{ video.creator }}</li>
-            <li>影片網址：<a href="https://www.youtube.com/watch?v={{ video.youtube_id }}" target="_blank">https://www.youtube.com/watch?v={{ video.youtube_id }}</a></li>
-            <li>上傳日期：{{ video.timestamp|datetime_format if video.timestamp else '' }}</li>
-            <li>影片長度：{{ video.duration }}</li>
-            <li>影片語言：{{ video.language }}</li>
-            <li>處理日期：{{ video.processed_at|datetime_format }}</li>
-            <li>截圖數量：{{ video.screenshots | length }}</li>
-            <li>有無字幕：{{ video.subtitle_used }}</li>            
-            <li>影片 ID：{{ video.youtube_id }}</li>
-        </ul>
-        <h2 class="text-2xl font-semibold mb-4">Summary</h2>
-        <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-            {{ video.summary | safe }}
+<body>
+    <div class="topbar">
+        <div class="brand">
+            <div class="brand-mark">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+            </div>
+            <div class="brand-name">YT 摘要助手</div>
         </div>
-
-        <h2 class="text-2xl font-semibold mb-4">Screenshots and Subtitles</h2>
-
-    <!-- 右側中間的切換按鈕 -->
-    <div id="toggleButton" class="fixed right-4 top-1/2 transform -translate-y-1/2 bg-blue-500 text-white px-4 py-2 rounded-l-full cursor-pointer shadow-lg">
-        原文<br>顯示
     </div>
 
-        <!-- 截圖和字幕網格 -->
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {% for item in paired_data %}
-        <div class="bg-white rounded-lg shadow-md overflow-hidden">
-            <a href="{{ url_for('static', filename='screenshots/' + item.screenshot.filename) }}" 
-                data-fancybox="gallery"
-                data-caption="時間：{{ item.screenshot.timestamp | format_timestamp }}</br>
-                        原文：<blockquote> {{ item.original_subtitles | map(attribute='text') | join('</br>') }}</blockquote>
-                        翻譯：<blockquote> {{ item.translated_subtitles | map(attribute='text') | join('</br>') }}</blockquote>">
-                <img src="{{ url_for('static', filename='screenshots/' + item.screenshot.filename) }}" 
-                     alt="截圖時間：{{ item.screenshot.timestamp }}"
-                     class="w-full h-48 object-cover">
-            </a>
-            <div class="p-4">
-                <p class="font-bold">{{ item.screenshot.timestamp | format_timestamp }}</p>
+    <div class="container container-narrow">
+        <a class="back-link" href="{{ url_for('index') }}">
+            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            返回列表
+        </a>
 
-                <div class="translated-subtitle">
-                    {% if item.translated_subtitles %}
-                    <p class="text-sm text-gray-600 mt-2"></p>
-                    {% for subtitle in item.translated_subtitles %}
-                    {% if subtitle.speaker_changed %}<p class="text-xs text-blue-500 font-semibold mt-1">🔄 換人講了</p>{% endif %}
-                    <p class="text-sm">{{ subtitle.text }}</p>
-                    {% endfor %}
-                    {% endif %}
-                </div>
-                <div class="original-subtitle hidden">
-                    {% if item.original_subtitles %}
-                    <p class="text-sm text-gray-600 mt-2">原文:</p>
-                    {% for subtitle in item.original_subtitles %}
-                    {% if subtitle.speaker_changed %}<p class="text-xs text-blue-500 font-semibold mt-1">🔄 換人講了</p>{% endif %}
-                    <p class="text-sm">{{ subtitle.text }}</p>
-                    {% endfor %}
-                    {% endif %}
+        <div class="head-row">
+            <div>
+                <div class="title">{{ video.title }}</div>
+                <div class="meta-row">
+                    <div class="chip">
+                        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                        {{ video.creator or 'Unknown' }}
+                    </div>
+                    <div class="chip">
+                        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+                        {{ video.timestamp|datetime_format('%Y-%m-%d') if video.timestamp else '未知日期' }}
+                    </div>
+                    <div class="chip">
+                        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                        {{ video.duration or '未知長度' }}
+                    </div>
+                    <div class="chip accent">
+                        {% if video.subtitle_used %}
+                        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"></path></svg>
+                        字幕．原文 {{ video.language or '未知' }}
+                        {% else %}
+                        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path></svg>
+                        語音轉錄．{{ video.language or '未知' }}
+                        {% endif %}
+                    </div>
+                    <div class="chip">
+                        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+                        {{ video.screenshots|length }} 張截圖
+                    </div>
+                    <a class="chip" href="https://www.youtube.com/watch?v={{ video.youtube_id }}" target="_blank" rel="noopener">
+                        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                        在 YouTube 開啟
+                    </a>
                 </div>
             </div>
-        </div>
-        {% endfor %}
-    </div>
 
-    
-        <h2 class="text-2xl font-semibold mb-4">Translation and Transcription</h2>
-        <div class="translation-transcription-container">
-            <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-                <h3 class="text-xl font-semibold mb-2">Translation</h3>
-                <pre id="full-translation">{{ video.translation }}</pre>
-            </div>
-            <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-                <h3 class="text-xl font-semibold mb-2">Transcription</h3>
-                <pre id="full-transcription">{{ video.transcription }}</pre>
+            <div class="segmented" id="langToggle">
+                <button type="button" class="is-active" data-mode="translated">翻譯</button>
+                <button type="button" data-mode="original">原文</button>
             </div>
         </div>
 
-        <p style="text-align:right;"><a href="{{ url_for('index') }}">Back to Index</a></p>
+        <div class="section">
+            <div class="section-title">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+                摘要
+            </div>
+            <div class="card summary-card">
+                {{ video.summary | safe }}
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+                截圖與字幕
+            </div>
+            <div class="shots-grid">
+                {% for item in paired_data %}
+                <div class="card shot-card">
+                    <a class="shot-thumb"
+                       href="{{ url_for('static', filename='screenshots/' + item.screenshot.filename) }}"
+                       data-fancybox="gallery"
+                       data-caption="時間：{{ item.screenshot.timestamp | format_timestamp }}<br>翻譯：{{ item.translated_subtitles | map(attribute='text') | join('<br>') }}<br>原文：{{ item.original_subtitles | map(attribute='text') | join('<br>') }}">
+                        <img src="{{ url_for('static', filename='screenshots/' + item.screenshot.filename) }}" alt="截圖時間 {{ item.screenshot.timestamp | format_timestamp }}">
+                        <div class="shot-time">{{ item.screenshot.timestamp | format_timestamp }}</div>
+                    </a>
+                    <div class="shot-body">
+                        {% if item.translated_subtitles %}
+                        {% for subtitle in item.translated_subtitles %}
+                        {% if subtitle.speaker_changed %}
+                        <div class="speaker-tag" data-lang="translated">
+                            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
+                            換人講話
+                        </div>
+                        {% endif %}
+                        <p class="shot-text" data-lang="translated">{{ subtitle.text }}</p>
+                        {% endfor %}
+                        {% else %}
+                        <p class="shot-text shot-empty" data-lang="translated">（此片段沒有對應字幕）</p>
+                        {% endif %}
+
+                        {% if item.original_subtitles %}
+                        {% for subtitle in item.original_subtitles %}
+                        {% if subtitle.speaker_changed %}
+                        <div class="speaker-tag is-hidden" data-lang="original">
+                            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
+                            換人講話
+                        </div>
+                        {% endif %}
+                        <p class="shot-text is-hidden" data-lang="original">{{ subtitle.text }}</p>
+                        {% endfor %}
+                        {% else %}
+                        <p class="shot-text shot-empty is-hidden" data-lang="original">（此片段沒有對應字幕）</p>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <details class="card disclosure">
+            <summary class="disclosure-head">
+                <span class="disclosure-title">
+                    <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+                    顯示原始逐字稿（進階，含時間戳記）
+                </span>
+                <svg class="icon-sm chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </summary>
+            <div class="disclosure-body">
+                <div class="raw-cols">
+                    <div>
+                        <div class="raw-col-title">翻譯 VTT</div>
+                        <pre id="full-translation">{{ video.translation }}</pre>
+                    </div>
+                    <div>
+                        <div class="raw-col-title">原文 VTT</div>
+                        <pre id="full-transcription">{{ video.transcription }}</pre>
+                    </div>
+                </div>
+            </div>
+        </details>
+
+        <a class="back-link" href="{{ url_for('index') }}" style="margin-top:28px;justify-content:flex-end;">
+            返回列表
+            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+        </a>
     </div>
 
-    <!-- 添加 Fancybox JS -->
     <script src="https://cdn.jsdelivr.net/npm/@fancyapps/ui@4.0/dist/fancybox.umd.js"></script>
     <script>
-        // 初始化 Fancybox
-        Fancybox.bind("[data-fancybox]", {
-            // 可以在這裡添加 Fancybox 的配置選項
-            caption: {
-    type: "html"
-  }
+        Fancybox.bind("[data-fancybox]", { caption: { type: "html" } });
+
+        // 原文／翻譯切換：單一控制點同時影響截圖旁的字幕跟「換人講話」標記，
+        // 不會像舊版一樣切一半（下方原始逐字稿是獨立的「進階」區塊，兩種語言
+        // 本來就並排顯示，不受這個切換影響）。
+        document.addEventListener('DOMContentLoaded', function () {
+            const toggle = document.getElementById('langToggle');
+            if (!toggle) return;
+            const buttons = toggle.querySelectorAll('button');
+            buttons.forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    const mode = btn.dataset.mode;
+                    buttons.forEach((b) => b.classList.toggle('is-active', b === btn));
+                    document.querySelectorAll('[data-lang]').forEach((el) => {
+                        el.classList.toggle('is-hidden', el.dataset.lang !== mode);
+                    });
+                });
+            });
         });
     </script>
-
-<script>
-    document.addEventListener('DOMContentLoaded', function() {
-        const toggleButton = document.getElementById('toggleButton');
-        const originalSubtitles = document.querySelectorAll('.original-subtitle');
-        let isOriginalVisible = false;
-
-        toggleButton.addEventListener('click', function() {
-            isOriginalVisible = !isOriginalVisible;
-            originalSubtitles.forEach(subtitle => {
-                subtitle.classList.toggle('hidden');
-            });
-            toggleButton.innerHTML = isOriginalVisible ? '原文<br>隱藏' : '原文<br>顯示';
-        });
-    });
-</script>
-
 </body>
 </html>

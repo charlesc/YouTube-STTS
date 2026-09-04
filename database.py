@@ -132,13 +132,16 @@ def search_videos(query):
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
 
+    # 標題跟作者都要能搜得到——前端搜尋框的提示文字寫的是「搜尋標題或作者」，
+    # 舊版只比對 title，搜作者名稱會完全搜不到、跟提示文字對不上。
+    like_pattern = '%' + query + '%'
     c.execute(
         '''SELECT id, youtube_id, title, description, creator, timestamp, duration, language,
                   MAX(processed_at) as processed_at, screenshots, subtitle_used
                  FROM videos
-                 WHERE title LIKE ?
+                 WHERE title LIKE ? OR creator LIKE ?
                  GROUP BY youtube_id
-                 ORDER BY MAX(processed_at) DESC''', ('%' + query + '%', ))
+                 ORDER BY MAX(processed_at) DESC''', (like_pattern, like_pattern))
 
     videos = []
     for row in c.fetchall():

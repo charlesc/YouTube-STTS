@@ -3,60 +3,176 @@ document.addEventListener('DOMContentLoaded', () => {
     const youtubeUrl = document.getElementById('youtubeUrl');
     const captureInterval = document.getElementById('captureInterval');
     const message = document.getElementById('message');
-    const videoTable = document.querySelector('table'); // 假設視頻列表是一個表格
-    const searchForm = document.getElementById('searchForm');
-    const searchQuery = document.getElementById('searchQuery');
-    
-    const JOB_POLL_INTERVAL_MS = 3000;
+    const submitBtn = document.getElementById('submitBtn');
+    const submitBtnLabel = document.getElementById('submitBtnLabel');
+    const videoTable = document.getElementById('videoTable');
+    const videoCount = document.getElementById('videoCount');
+    const tableFoot = document.getElementById('tableFoot');
+    const searchInput = document.getElementById('searchInput');
+    const jobsSection = document.getElementById('jobsSection');
+    const jobsList = document.getElementById('jobsList');
+    const jobsCount = document.getElementById('jobsCount');
+    const confirmModal = document.getElementById('confirmModal');
+    const confirmModalBody = document.getElementById('confirmModalBody');
+    const confirmModalCancel = document.getElementById('confirmModalCancel');
+    const confirmModalOk = document.getElementById('confirmModalOk');
 
-    function pollJobStatus(jobId) {
-        const timer = setInterval(async () => {
+    const JOB_POLL_INTERVAL_MS = 3000;
+    const JOB_REMOVE_DELAY_MS = 2500; // 工作結束後，讓使用者看得到「完成/失敗」訊息再從清單移除
+
+    // job_id -> { label, progress, status, error }
+    const jobs = new Map();
+    let jobsTimer = null;
+
+    function setMessage(text, kind) {
+        if (!message) return;
+        message.textContent = text || '';
+        message.classList.remove('is-error', 'is-success');
+        if (kind) message.classList.add(kind === 'error' ? 'is-error' : 'is-success');
+    }
+
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.textContent = str == null ? '' : String(str);
+        return div.innerHTML;
+    }
+
+    // ---- 處理中的工作：清單渲染 + 輪詢 ----
+
+    function renderJobs() {
+        if (!jobsSection || !jobsList) return;
+
+        if (jobs.size === 0) {
+            jobsSection.hidden = true;
+            jobsList.innerHTML = '';
+            return;
+        }
+
+        jobsSection.hidden = false;
+        if (jobsCount) jobsCount.textContent = String(jobs.size);
+
+        jobsList.innerHTML = Array.from(jobs.entries()).map(([jobId, job]) => {
+            const isError = job.status === 'error';
+            const isDone = job.status === 'done';
+            const icon = isError
+                ? '<div class="icon-btn danger" style="cursor:default"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg></div>'
+                : isDone
+                    ? '<div class="icon-btn" style="cursor:default;color:var(--success)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></div>'
+                    : '<div class="spinner"></div>';
+            const progressText = isError ? (job.error || '處理失敗') : (isDone ? '處理完成' : (job.progress || '正在處理…'));
+            return `
+                <div class="job-card card${isError ? ' is-error' : ''}" data-job-id="${escapeHtml(jobId)}">
+                    ${icon}
+                    <div class="job-main">
+                        <div class="job-title">${escapeHtml(job.label)}</div>
+                        <div class="job-progress">${escapeHtml(progressText)}</div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function stopJobsPollingIfIdle() {
+        const stillActive = Array.from(jobs.values()).some((j) => j.status === 'processing');
+        if (!stillActive && jobsTimer) {
+            clearInterval(jobsTimer);
+            jobsTimer = null;
+        }
+    }
+
+    async function pollAllJobs() {
+        const activeIds = Array.from(jobs.entries())
+            .filter(([, job]) => job.status === 'processing')
+            .map(([id]) => id);
+
+        if (activeIds.length === 0) {
+            stopJobsPollingIfIdle();
+            return;
+        }
+
+        await Promise.all(activeIds.map(async (jobId) => {
             try {
                 const response = await fetch(`/job_status/${jobId}`);
+                const data = await response.json();
+
                 if (!response.ok) {
-                    clearInterval(timer);
-                    if (message) message.textContent = '找不到這個處理工作，請重新提交。';
+                    jobs.set(jobId, { ...jobs.get(jobId), status: 'error', error: data.error || '找不到這個處理工作，請重新提交。' });
+                    scheduleJobRemoval(jobId);
                     return;
                 }
 
-                const job = await response.json();
-                if (job.status === 'processing') {
-                    if (message && job.progress) message.textContent = job.progress;
-                    return; // 繼續等待下一次輪詢
+                if (data.status === 'processing') {
+                    jobs.set(jobId, { ...jobs.get(jobId), status: 'processing', progress: data.progress });
+                    return;
                 }
 
-                clearInterval(timer);
-
-                if (job.status === 'done') {
-                    if (message) message.textContent = '視頻處理成功！';
-                    try {
-                        const updatedVideos = await fetch('/api/videos');
-                        const videoData = await updatedVideos.json();
-                        updateVideoTable(videoData);
-                    } catch (error) {
-                        console.error('更新視頻列表時發生錯誤:', error);
-                        if (message) message.textContent = '視頻處理成功，但更新列表失敗。';
-                    }
+                if (data.status === 'done') {
+                    jobs.set(jobId, { ...jobs.get(jobId), status: 'done' });
+                    setMessage(`《${jobs.get(jobId).label}》處理成功！`, 'success');
+                    refreshVideoList();
+                    scheduleJobRemoval(jobId);
                 } else {
-                    if (message) message.textContent = job.error || '處理視頻時發生錯誤。';
+                    jobs.set(jobId, { ...jobs.get(jobId), status: 'error', error: data.error || '處理視頻時發生錯誤。' });
+                    setMessage(`《${jobs.get(jobId).label}》${data.error || '處理視頻時發生錯誤。'}`, 'error');
+                    scheduleJobRemoval(jobId);
                 }
             } catch (error) {
-                clearInterval(timer);
                 console.error('查詢處理進度時發生錯誤:', error);
-                if (message) message.textContent = '查詢處理進度時發生錯誤。';
+                jobs.set(jobId, { ...jobs.get(jobId), status: 'error', error: '查詢處理進度時發生錯誤。' });
+                scheduleJobRemoval(jobId);
             }
-        }, JOB_POLL_INTERVAL_MS);
+        }));
+
+        renderJobs();
     }
+
+    function scheduleJobRemoval(jobId) {
+        setTimeout(() => {
+            jobs.delete(jobId);
+            renderJobs();
+            stopJobsPollingIfIdle();
+        }, JOB_REMOVE_DELAY_MS);
+    }
+
+    function ensureJobsPolling() {
+        if (jobsTimer) return;
+        jobsTimer = setInterval(pollAllJobs, JOB_POLL_INTERVAL_MS);
+    }
+
+    function addJob(jobId, label) {
+        jobs.set(jobId, { label, status: 'processing', progress: '正在查詢影片與字幕資訊...' });
+        renderJobs();
+        ensureJobsPolling();
+    }
+
+    async function refreshVideoList() {
+        try {
+            const response = await fetch('/api/videos');
+            const videos = await response.json();
+            updateVideoTable(videos);
+        } catch (error) {
+            console.error('更新視頻列表時發生錯誤:', error);
+        }
+    }
+
+    // ---- 新增影片表單 ----
 
     if (videoForm) {
         videoForm.addEventListener('submit', async (e) => {
             e.preventDefault();
 
-            if (message) message.textContent = '正在處理視頻，這可能需要幾分鐘，請稍候...';
+            const urlValue = youtubeUrl ? youtubeUrl.value.trim() : '';
+            if (!urlValue) return;
 
-            const youtubeUrlValue = youtubeUrl ? youtubeUrl.value.trim() : '';
+            // 送出期間鎖定按鈕，避免連點造成重複的處理工作；一旦後端接受、
+            // 拿到 job_id 就馬上恢復，讓使用者可以繼續新增下一支影片,
+            // 不用等這一支處理完。
+            if (submitBtn) submitBtn.disabled = true;
+            if (submitBtnLabel) submitBtnLabel.textContent = '送出中…';
+            setMessage('');
+
             const formData = new FormData();
-            formData.append('youtube_url', youtubeUrlValue);
+            formData.append('youtube_url', urlValue);
             formData.append('capture_interval', captureInterval ? captureInterval.value : '10');
 
             try {
@@ -65,130 +181,246 @@ document.addEventListener('DOMContentLoaded', () => {
                     body: formData
                 });
 
-                console.log('Response Status:', response.status);
-
                 if (response.ok) {
                     const result = await response.json();
-                    console.log('Server response:', result);
                     if (result.job_id) {
-                        pollJobStatus(result.job_id);
+                        addJob(result.job_id, urlValue);
+                        setMessage('已開始處理，可以繼續新增下一支影片。', 'success');
+                        if (youtubeUrl) youtubeUrl.value = '';
                     } else {
-                        if (message) message.textContent = '處理視頻時發生錯誤。';
+                        setMessage('處理視頻時發生錯誤。', 'error');
                     }
                 } else {
                     const errorResult = await response.json();
-                    if (message) message.textContent = `錯誤: ${errorResult.error || '處理視頻時發生錯誤。'}`;
+                    setMessage(`錯誤: ${errorResult.error || '處理視頻時發生錯誤。'}`, 'error');
                 }
             } catch (error) {
                 console.error('處理視頻時發生錯誤:', error);
-                if (message) message.textContent = '處理視頻時發生錯誤。';
+                setMessage('處理視頻時發生錯誤。', 'error');
+            } finally {
+                if (submitBtn) submitBtn.disabled = false;
+                if (submitBtnLabel) submitBtnLabel.textContent = '開始處理';
             }
         });
-    } else {
-        console.warn('未找到視頻表單元素');
+    }
+
+    // ---- 搜尋 ----
+
+    if (searchInput) {
+        let debounceTimer = null;
+        searchInput.addEventListener('input', () => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(async () => {
+                const q = searchInput.value.trim();
+                try {
+                    const response = await fetch(`/search?q=${encodeURIComponent(q)}`);
+                    const videos = await response.json();
+                    updateVideoTable(videos);
+                } catch (error) {
+                    console.error('搜尋影片時發生錯誤:', error);
+                }
+            }, 300);
+        });
+    }
+
+    // ---- 刪除確認 modal ----
+
+    let pendingDeleteId = null;
+
+    function openConfirmModal(youtubeId, title) {
+        pendingDeleteId = youtubeId;
+        if (confirmModalBody) {
+            confirmModalBody.textContent = `確定要刪除「${title}」嗎？相關截圖也會一併刪除，這個動作無法復原。`;
+        }
+        if (confirmModal) confirmModal.hidden = false;
+    }
+
+    function closeConfirmModal() {
+        pendingDeleteId = null;
+        if (confirmModal) confirmModal.hidden = true;
+    }
+
+    if (confirmModalCancel) confirmModalCancel.addEventListener('click', closeConfirmModal);
+    if (confirmModal) {
+        confirmModal.addEventListener('click', (e) => {
+            if (e.target === confirmModal) closeConfirmModal();
+        });
+    }
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && confirmModal && !confirmModal.hidden) closeConfirmModal();
+    });
+
+    if (confirmModalOk) {
+        confirmModalOk.addEventListener('click', async () => {
+            if (!pendingDeleteId) return;
+            const youtubeId = pendingDeleteId;
+            closeConfirmModal();
+
+            try {
+                const response = await fetch(`/delete_video/${youtubeId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                });
+                const result = await response.json();
+                if (response.ok) {
+                    setMessage(result.message || '已刪除。', 'success');
+                    const row = videoTable && videoTable.querySelector(`tbody tr[data-youtube-id="${youtubeId}"]`);
+                    if (row) row.remove();
+                    updateFootCount();
+                } else {
+                    setMessage(`刪除失敗: ${result.message || ''}`, 'error');
+                }
+            } catch (error) {
+                console.error('刪除視頻時發生錯誤:', error);
+                setMessage('刪除視頻時發生錯誤。', 'error');
+            }
+        });
     }
 
     if (videoTable) {
-        videoTable.addEventListener('click', async (e) => {
-            if (e.target.closest('.delete-btn')) {
-                e.preventDefault();
-                const deleteBtn = e.target.closest('.delete-btn');
-                const youtubeId = deleteBtn.dataset.youtubeId;
-                const confirmMessage = deleteBtn.dataset.confirmMessage || '確定要刪除這個視頻嗎？';
-                
-                if (confirm(confirmMessage)) {
-                    try {
-                        const response = await fetch(`/delete_video/${youtubeId}`, {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json'
-                            },
-                        });
-                        const result = await response.json();
-                        if (response.ok) {
-                            alert(result.message);
-                            // 從 DOM 中移除對應的表格行
-                            const row = deleteBtn.closest('tr');
-                            if (row) {
-                                row.remove();
-                            }
-                        } else {
-                            alert(`刪除失敗: ${result.message}`);
-                        }
-                    } catch (error) {
-                        console.error('刪除視頻時發生錯誤:', error);
-                        alert('刪除視頻時發生錯誤。');
-                    }
-                }
-            }
+        videoTable.addEventListener('click', (e) => {
+            const deleteBtn = e.target.closest('.delete-btn');
+            if (!deleteBtn) return;
+            e.preventDefault();
+            openConfirmModal(deleteBtn.dataset.youtubeId, deleteBtn.dataset.videoTitle || '這支影片');
         });
-    } else {
-        console.warn('未找到視頻表格元素');
+    }
+
+    // ---- 影片表格：渲染 + 排序 ----
+
+    function subtitleBadgeHtml(video) {
+        if (video.subtitle_used === true) {
+            return `<span class="badge badge-subtitle">
+                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"></path></svg>
+                有字幕
+            </span>`;
+        }
+        if (video.subtitle_used === false) {
+            return `<span class="badge badge-asr">
+                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path></svg>
+                語音轉錄
+            </span>`;
+        }
+        return '<span class="video-creator">—</span>';
+    }
+
+    function thumbHtml(video) {
+        const shot = Array.isArray(video.screenshots) && video.screenshots.length > 0 ? video.screenshots[0] : null;
+        if (shot && shot.filename) {
+            return `<img src="/static/screenshots/${escapeHtml(shot.filename)}" alt="">`;
+        }
+        return '<svg class="icon-sm" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>';
+    }
+
+    function formatDate(value) {
+        if (!value) return '';
+        const d = new Date(value);
+        if (Number.isNaN(d.getTime())) return '';
+        return d.toISOString().slice(0, 10);
     }
 
     function updateVideoTable(videos) {
-        if (videoTable) {
-            const tbody = videoTable.querySelector('tbody');
-            if (!tbody) {
-                console.warn('未找到表格主體元素');
-                return;
-            }
-            tbody.innerHTML = ''; // 清空當前視頻列表
-            if (Array.isArray(videos) && videos.length > 0) {
-                videos.forEach(video => {
-                    const row = document.createElement('tr');
-                    row.innerHTML = `
-                        <td><a href="/video/${video.youtube_id}">${video.title}</a></td>
-                        <td>${video.creator || 'Unknown'}</td>
-                        <td>${video.timestamp ? new Date(video.timestamp).toLocaleString() : ''}</td>
-                        <td>${video.duration || ''}</td>
-                        <td>${video.language || ''}</td>
-                        <td>${video.subtitle_used ? 'Yes' : 'No'}</td>
-                        <td><button class="delete-btn" data-youtube-id="${video.youtube_id}">刪除</button></td>
-                    `;
-                    tbody.appendChild(row);
-                });
-            } else {
-                const row = document.createElement('tr');
-                row.innerHTML = '<td colspan="7">沒有找到視頻。</td>';
-                tbody.appendChild(row);
-            }
-        } else {
-            console.warn('未找到視頻表格元素，無法更新');
-        }
-    }
-
-    // 添加排序功能
-    const sortIcons = document.querySelectorAll('.sort-icon');
-    sortIcons.forEach(icon => {
-        icon.addEventListener('click', () => {
-            const column = icon.parentElement.textContent.trim();
-            sortTable(column);
-        });
-    });
-
-    function sortTable(column) {
+        if (!videoTable) return;
         const tbody = videoTable.querySelector('tbody');
-        const rows = Array.from(tbody.querySelectorAll('tr'));
-        const columnIndex = getColumnIndex(column);
+        if (!tbody) return;
 
-        rows.sort((a, b) => {
-            const aValue = a.cells[columnIndex].textContent.trim();
-            const bValue = b.cells[columnIndex].textContent.trim();
-            return aValue.localeCompare(bValue, 'zh-TW');
-        });
+        if (!Array.isArray(videos) || videos.length === 0) {
+            tbody.innerHTML = '<tr class="empty-row"><td colspan="6">沒有找到符合的影片。</td></tr>';
+            updateFootCount(0);
+            return;
+        }
 
-        tbody.innerHTML = '';
-        rows.forEach(row => tbody.appendChild(row));
+        tbody.innerHTML = videos.map((video) => `
+            <tr data-youtube-id="${escapeHtml(video.youtube_id)}">
+                <td>
+                    <div class="title-cell">
+                        <div class="thumb">${thumbHtml(video)}</div>
+                        <div>
+                            <a class="video-title" href="/video/${escapeHtml(video.youtube_id)}">${escapeHtml(video.title)}</a>
+                            <div class="video-creator">${escapeHtml(video.creator || 'Unknown')}</div>
+                        </div>
+                    </div>
+                </td>
+                <td>${formatDate(video.timestamp)}</td>
+                <td>${escapeHtml(video.duration || '')}</td>
+                <td>${escapeHtml(video.language || '')}</td>
+                <td>${subtitleBadgeHtml(video)}</td>
+                <td>
+                    <div class="row-actions">
+                        <a class="icon-btn" href="/video/${escapeHtml(video.youtube_id)}" aria-label="查看">
+                            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                        </a>
+                        <button type="button" class="icon-btn danger delete-btn" data-youtube-id="${escapeHtml(video.youtube_id)}" data-video-title="${escapeHtml(video.title)}" aria-label="刪除">
+                            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path></svg>
+                        </button>
+                    </div>
+                </td>
+            </tr>
+        `).join('');
+
+        updateFootCount(videos.length);
     }
 
-    function getColumnIndex(columnName) {
-        const headers = videoTable.querySelectorAll('th');
-        for (let i = 0; i < headers.length; i++) {
-            if (headers[i].textContent.trim() === columnName) {
-                return i;
-            }
+    function updateFootCount(explicitCount) {
+        const count = typeof explicitCount === 'number'
+            ? explicitCount
+            : (videoTable ? videoTable.querySelectorAll('tbody tr[data-youtube-id]').length : 0);
+        if (videoCount) videoCount.textContent = String(count);
+        if (tableFoot) tableFoot.textContent = count === 0 ? '目前沒有已處理的影片' : `共 ${count} 支影片`;
+    }
+
+    // ---- 表格排序（單一實作，首頁初次渲染跟搜尋/更新後的表格共用）----
+
+    if (videoTable) {
+        const headers = videoTable.querySelectorAll('th.sortable');
+
+        headers.forEach((header, index) => {
+            header.addEventListener('click', () => {
+                const column = header.dataset.sort;
+                const sortIcon = header.querySelector('.sort-icon');
+                const isAscending = sortIcon.classList.contains('asc');
+
+                headers.forEach((h) => h.querySelector('.sort-icon').className = 'sort-icon');
+                sortIcon.classList.add(isAscending ? 'desc' : 'asc');
+                const ascending = !isAscending;
+
+                const tbody = videoTable.querySelector('tbody');
+                const rows = Array.from(tbody.querySelectorAll('tr[data-youtube-id]'));
+
+                const cellText = (row) => {
+                    const cell = row.children[index];
+                    // 「影片」欄裡除了標題還有縮圖跟作者子文字，排序要只看標題本身，
+                    // 不然會被無關的作者文字影響排序結果。
+                    const titleEl = column === 'title' ? cell.querySelector('.video-title') : null;
+                    return (titleEl ? titleEl.textContent : cell.textContent).trim();
+                };
+
+                rows.sort((a, b) => {
+                    const aValue = cellText(a);
+                    const bValue = cellText(b);
+
+                    if (column === 'timestamp') return compareDates(aValue, bValue, ascending);
+                    if (column === 'duration') return compareDurations(aValue, bValue, ascending);
+                    return compareStrings(aValue, bValue, ascending);
+                });
+
+                rows.forEach((row) => tbody.appendChild(row));
+            });
+        });
+
+        function compareDates(a, b, ascending) {
+            const diff = new Date(a) - new Date(b);
+            return ascending ? diff : -diff;
         }
-        return 0; // 默認返回第一列
+
+        function compareDurations(a, b, ascending) {
+            const toSeconds = (duration) => duration.split(':').map(Number).reduce((acc, part) => acc * 60 + part, 0);
+            const diff = toSeconds(a || '0') - toSeconds(b || '0');
+            return ascending ? diff : -diff;
+        }
+
+        function compareStrings(a, b, ascending) {
+            return ascending ? a.localeCompare(b, 'zh-TW') : b.localeCompare(a, 'zh-TW');
+        }
     }
 });
