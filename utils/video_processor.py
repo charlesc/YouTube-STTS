@@ -259,6 +259,18 @@ def _pick_subtitle_language(info):
     return None
 
 
+def _resize_frame_if_too_wide(frame, max_width=None):
+    """截圖依影片原始解析度存檔，4K/2K 影片截圖會不必要地大、網頁上也用不到
+    這麼高的解析度，寬度超過 config.SCREENSHOT_MAX_WIDTH 就等比例縮小；
+    影片本身比門檻窄（例如直式短影音）就不放大，維持原本大小。"""
+    max_width = max_width if max_width is not None else config.SCREENSHOT_MAX_WIDTH
+    height, width = frame.shape[:2]
+    if max_width <= 0 or width <= max_width:
+        return frame
+    new_height = round(height * (max_width / width))
+    return cv2.resize(frame, (max_width, new_height), interpolation=cv2.INTER_AREA)
+
+
 def process_video(youtube_url, output_folder, capture_interval=10, on_progress=None):
     """處理一支 YouTube 影片：下載、找字幕或轉錄、翻譯、摘要、擷取截圖。
 
@@ -429,7 +441,7 @@ def process_video(youtube_url, output_folder, capture_interval=10, on_progress=N
                 timestamp = i / fps if fps > 0 else i / 30
                 filename = f"{video_id}_{timestamp:.2f}.jpg"
                 filepath = os.path.join(output_folder, filename)
-                cv2.imwrite(filepath, frame)
+                cv2.imwrite(filepath, _resize_frame_if_too_wide(frame))
                 screenshots.append({
                     'filename': filename,
                     'timestamp': f"{timestamp:.2f}s"

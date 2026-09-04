@@ -1,3 +1,5 @@
+import numpy as np
+
 import utils.video_processor as vp
 
 
@@ -85,6 +87,7 @@ def _apply_common_patches(monkeypatch, extra_files=None):
     monkeypatch.setattr(vp, "remove_duplicate_images", lambda folder, screenshots: screenshots)
     monkeypatch.setattr(vp.cv2, "VideoCapture", lambda path: FakeVideoCapture(path))
     monkeypatch.setattr(vp.cv2, "imwrite", lambda path, frame: True)
+    monkeypatch.setattr(vp, "_resize_frame_if_too_wide", lambda frame, max_width=None: frame)
     monkeypatch.setattr(vp, "detect_language", lambda text: "english")
     monkeypatch.setattr(vp.yt_dlp, "YoutubeDL", _make_fake_ydl(extra_files))
 
@@ -139,6 +142,7 @@ def test_process_video_falls_back_to_video_only_when_subtitle_download_fails(tmp
     monkeypatch.setattr(vp, "remove_duplicate_images", lambda folder, screenshots: screenshots)
     monkeypatch.setattr(vp.cv2, "VideoCapture", lambda path: FakeVideoCapture(path))
     monkeypatch.setattr(vp.cv2, "imwrite", lambda path, frame: True)
+    monkeypatch.setattr(vp, "_resize_frame_if_too_wide", lambda frame, max_width=None: frame)
     monkeypatch.setattr(vp, "detect_language", lambda text: "english")
     # 轉去轉錄之後怎麼樣不是這個測試關心的重點，讓它乾脆地失敗即可，
     # 重點是驗證流程有沒有走到這裡、而不是整支直接報錯。
@@ -269,6 +273,32 @@ def test_process_video_cleans_up_its_own_work_dir(tmp_path, monkeypatch):
 
     assert 'path' in captured_work_dir
     assert not vp.os.path.exists(captured_work_dir['path'])
+
+
+# --- 截圖縮放（_resize_frame_if_too_wide）---
+#
+# 截圖依影片原始解析度存檔，4K/2K 影片截圖會不必要地大、網頁上也用不到
+# 這麼高的解析度。寬度超過 config.SCREENSHOT_MAX_WIDTH 時等比例縮小；
+# 比門檻窄的影片（例如直式短影音）不放大。
+
+def test_resize_frame_if_too_wide_downscales_wide_frame():
+    frame = np.zeros((1080, 3840, 3), dtype=np.uint8)  # 4K 橫向影片截圖
+    resized = vp._resize_frame_if_too_wide(frame, max_width=1440)
+    assert resized.shape[1] == 1440
+    assert resized.shape[0] == 405  # 1080 * (1440/3840)，維持長寬比
+
+
+def test_resize_frame_if_too_wide_leaves_narrow_frame_untouched():
+    frame = np.zeros((1920, 1080, 3), dtype=np.uint8)  # 直式短影音，比門檻窄
+    resized = vp._resize_frame_if_too_wide(frame, max_width=1440)
+    assert resized.shape == frame.shape
+
+
+def test_resize_frame_if_too_wide_uses_config_default(monkeypatch):
+    monkeypatch.setattr(vp.config, "SCREENSHOT_MAX_WIDTH", 640)
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    resized = vp._resize_frame_if_too_wide(frame)
+    assert resized.shape[1] == 640
 
 
 # --- 字幕語言探查（_pick_subtitle_language）---

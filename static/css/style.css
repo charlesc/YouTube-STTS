@@ -373,6 +373,39 @@ tbody tr:hover { background: var(--surface-alt); }
 }
 .chip.accent { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 
+/* 「顯示原文」浮動在視窗右邊中間，捲動 129 張截圖的過程中隨時都能點，
+   不用捲回頁首。停靠在螢幕邊緣、只露出圓角的一側，跟頁籤一樣。 */
+.floating-toggle {
+  position: fixed;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 14px 10px;
+  border: none;
+  border-top-left-radius: var(--radius);
+  border-bottom-left-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  box-shadow: -4px 0 16px rgba(16, 24, 40, .16);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+}
+.floating-toggle:hover { background: var(--accent-hover); }
+.floating-toggle[aria-pressed="true"] { background: var(--text); }
+
+@media (max-width: 640px) {
+  .floating-toggle { padding: 10px 8px; font-size: 11px; }
+}
+
 .summary-card { padding: 26px 28px; }
 .summary-card :is(h1, h2, h3, h4) { font-size: 13px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; margin: 20px 0 8px; }
 .summary-card :is(h1, h2, h3, h4):first-child { margin-top: 0; }

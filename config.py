@@ -15,6 +15,11 @@ FLASK_PORT = int(os.environ.get('FLASK_PORT', '5001'))
 FLASK_DEBUG = _env_bool('FLASK_DEBUG', default=False)
 UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', 'static/screenshots')
 
+# 截圖依影片原始解析度存檔，4K/2K 影片截圖會不必要地大（單張可能好幾 MB），
+# 網頁上顯示也用不到這麼高的解析度。寬度超過這個門檻時等比例縮小再存檔；
+# 影片本身比這個窄就不放大，維持原本大小。
+SCREENSHOT_MAX_WIDTH = int(os.environ.get('SCREENSHOT_MAX_WIDTH', '1440'))
+
 # SQLite
 DATABASE_NAME = os.environ.get('DATABASE_NAME', 'videos.db')
 
